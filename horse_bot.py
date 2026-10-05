@@ -3,7 +3,10 @@ import random
 import asyncio
 import json
 import re
+import uuid
 from pathlib import Path
+from urllib.parse import quote
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, time, timezone
@@ -23,6 +26,9 @@ CARROT_FILE = Path(os.getenv("CARROT_FILE", "carrots.json"))
 # This lets the countdown resume automatically after a bot restart.
 FOREVER_CONFIG_FILE = Path(os.getenv("FOREVER_CONFIG_FILE", "forever_countdown.json"))
 
+# Local save file for FFXIV Universalis market watches.
+XIV_WATCH_FILE = Path(os.getenv("XIV_WATCH_FILE", "xiv_watches.json"))
+
 # WoW Forever launch: 5 November 2026 at 00:00 Belgian time (CET).
 # Stored as UTC to keep the countdown timezone-safe.
 WOW_FOREVER_LAUNCH = datetime(2026, 11, 4, 23, 0, 0, tzinfo=timezone.utc)
@@ -32,7 +38,7 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.6.4"
+VERSION = "1.7.0"
 
 CHANGELOG = [
     "Upgraded !horserace into a visual ASCII horse race.",
@@ -45,6 +51,9 @@ CHANGELOG = [
     "Added !forevercd to turn a selected text channel into a persistent WoW Forever launch countdown.",
     "WoW Forever countdown channels are now auto-detected after bot restarts, even if the saved config is missing.",
     "Added Horsie to Railway, the horsie is now Mister WorldWide",
+    "Added !xivprice for live FFXIV market-board price checks via Universalis.",
+    "Added !xivwatch, !xivwatches, and !xivunwatch for persistent market price alerts.",
+    "Added a background FFXIV market watcher that checks active alerts every 5 minutes.",
 ]
 
 HORSE_IMAGES = [
@@ -322,6 +331,113 @@ def find_existing_forever_countdown_channel():
 
     return None
 
+
+
+def load_xiv_watches():
+    if not XIV_WATCH_FILE.exists():
+        return []
+
+    try:
+        with XIV_WATCH_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (json.JSONDecodeError, OSError) as error:
+        print(f"Could not read {XIV_WATCH_FILE}: {error}")
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    return data
+
+
+def save_xiv_watches(watches):
+    XIV_WATCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    with XIV_WATCH_FILE.open("w", encoding="utf-8") as file:
+        json.dump(watches, file, indent=4)
+
+
+async def find_xiv_item(item_name):
+    """Resolve a typed FFXIV item name to an XIVAPI item ID."""
+    safe_name = item_name.replace("\\", "\\\\").replace('"', '\\"')
+
+    params = {
+        "sheets": "Item",
+        "query": f'Name~"{safe_name}"',
+        "fields": "Name",
+        "limit": 10,
+    }
+
+    timeout = aiohttp.ClientTimeout(total=15)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            "https://v2.xivapi.com/api/search",
+            params=params,
+        ) as response:
+            response.raise_for_status()
+            data = await response.json()
+
+    results = data.get("results", [])
+
+    if not results:
+        return None
+
+    # Prefer an exact case-insensitive match when XIVAPI returns one.
+    for result in results:
+        name = result.get("fields", {}).get("Name", "")
+        if name.casefold() == item_name.casefold():
+            return int(result["row_id"]), name
+
+    # Otherwise use XIVAPI's highest-ranked search result.
+    result = results[0]
+    return (
+        int(result["row_id"]),
+        result.get("fields", {}).get("Name", item_name),
+    )
+
+
+async def get_xiv_price(world_or_dc, item_id):
+    """Return the cheapest current Universalis listing for an item."""
+    safe_world = quote(str(world_or_dc).strip(), safe="")
+    url = f"https://universalis.app/api/v2/{safe_world}/{int(item_id)}"
+
+    params = {
+        "listings": 20,
+        "entries": 0,
+    }
+
+    timeout = aiohttp.ClientTimeout(total=15)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, params=params) as response:
+            if response.status == 404:
+                return None
+
+            response.raise_for_status()
+            data = await response.json()
+
+    listings = data.get("listings", [])
+
+    if not listings:
+        return None
+
+    cheapest = min(
+        listings,
+        key=lambda listing: listing.get("pricePerUnit", float("inf")),
+    )
+
+    return {
+        "price": int(cheapest["pricePerUnit"]),
+        "quantity": int(cheapest.get("quantity", 1)),
+        "world": (
+            cheapest.get("worldName")
+            or data.get("worldName")
+            or str(world_or_dc)
+        ),
+        "hq": bool(cheapest.get("hq", False)),
+        "last_upload_time": data.get("lastUploadTime"),
+    }
 
 def add_carrot(user_id, display_name):
     data = load_carrots()
@@ -632,6 +748,69 @@ async def before_forever_countdown():
     await bot.wait_until_ready()
 
 
+
+@tasks.loop(minutes=5)
+async def check_xiv_market():
+    watches = load_xiv_watches()
+
+    if not watches:
+        return
+
+    completed_ids = set()
+
+    for watch in watches:
+        try:
+            market = await get_xiv_price(
+                watch["world"],
+                watch["item_id"],
+            )
+
+            if not market:
+                continue
+
+            if market["price"] <= int(watch["target_price"]):
+                channel = bot.get_channel(int(watch["channel_id"]))
+
+                if channel is None:
+                    print(
+                        f"Could not find Discord channel {watch['channel_id']} "
+                        f"for XIV watch {watch['id']}."
+                    )
+                    continue
+
+                quality = " HQ" if market["hq"] else ""
+
+                await channel.send(
+                    f"<@{watch['user_id']}> **FFXIV market alert!**\n"
+                    f"**{watch['item_name']}{quality}** is now "
+                    f"**{market['price']:,} gil** on **{market['world']}**.\n"
+                    f"Your target was **{int(watch['target_price']):,} gil** or lower.\n"
+                    f"Watch `{watch['id']}` has been completed."
+                )
+                completed_ids.add(str(watch["id"]))
+
+        except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError, ValueError) as error:
+            print(f"FFXIV market watch {watch.get('id', 'unknown')} failed: {error}")
+
+        # Be polite to the external API and avoid bursts when several watches exist.
+        await asyncio.sleep(0.25)
+
+    # Reload before saving so a watch added while this loop was checking prices
+    # is not accidentally overwritten.
+    if completed_ids:
+        current_watches = load_xiv_watches()
+        current_watches = [
+            watch
+            for watch in current_watches
+            if str(watch.get("id", "")) not in completed_ids
+        ]
+        save_xiv_watches(current_watches)
+
+
+@check_xiv_market.before_loop
+async def before_xiv_market():
+    await bot.wait_until_ready()
+
 @tasks.loop(time=time(hour=9, minute=0, tzinfo=timezone.utc))
 async def post_daily_horse():
     channel = bot.get_channel(CHANNEL_ID)
@@ -658,6 +837,9 @@ async def on_ready():
 
     if not update_forever_countdown.is_running():
         update_forever_countdown.start()
+
+    if not check_xiv_market.is_running():
+        check_xiv_market.start()
 
 
 @bot.command()
@@ -697,6 +879,175 @@ async def leaderboard(ctx):
 
     await ctx.send("🏆 **Stable Carrot Leaderboard**\n\n" + "\n".join(lines))
 
+
+
+@bot.command()
+async def xivprice(ctx, world: str, *, item: str):
+    """Show the cheapest current Universalis listing for an FFXIV item."""
+    try:
+        async with ctx.typing():
+            found = await find_xiv_item(item)
+
+            if not found:
+                await ctx.send(f"Could not find FFXIV item: **{item}**")
+                return
+
+            item_id, item_name = found
+            market = await get_xiv_price(world, item_id)
+
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        print(f"!xivprice API error: {error}")
+        await ctx.send("The FFXIV market APIs are not responding right now. Try again shortly.")
+        return
+
+    if not market:
+        await ctx.send(
+            f"No current market listings found for **{item_name}** on **{world}**."
+        )
+        return
+
+    quality = " HQ" if market["hq"] else ""
+
+    await ctx.send(
+        f"**{item_name}{quality}**\n"
+        f"Cheapest: **{market['price']:,} gil each**\n"
+        f"World: **{market['world']}**\n"
+        f"Quantity: **{market['quantity']}**"
+    )
+
+
+@bot.command()
+@commands.guild_only()
+async def xivwatch(ctx, world: str, max_price: str, *, item: str):
+    """Create a one-shot FFXIV market alert."""
+    try:
+        target_price = int(
+            max_price.replace(",", "").replace(".", "").replace("_", "")
+        )
+    except ValueError:
+        await ctx.send(
+            "Price must be a whole number. "
+            "Example: `!xivwatch Light 500000 Dark Matter`"
+        )
+        return
+
+    if target_price <= 0:
+        await ctx.send("The target price must be greater than 0 gil.")
+        return
+
+    try:
+        async with ctx.typing():
+            found = await find_xiv_item(item)
+
+            if not found:
+                await ctx.send(f"Could not find FFXIV item: **{item}**")
+                return
+
+            item_id, item_name = found
+            market = await get_xiv_price(world, item_id)
+
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        print(f"!xivwatch API error: {error}")
+        await ctx.send("The FFXIV market APIs are not responding right now. Try again shortly.")
+        return
+
+    if not market:
+        await ctx.send(
+            f"No current market listings found for **{item_name}** on **{world}**."
+        )
+        return
+
+    if market["price"] <= target_price:
+        quality = " HQ" if market["hq"] else ""
+        await ctx.send(
+            f"{ctx.author.mention} **{item_name}{quality}** is already "
+            f"**{market['price']:,} gil** on **{market['world']}**."
+        )
+        return
+
+    watches = load_xiv_watches()
+    watch_id = uuid.uuid4().hex[:6]
+
+    watches.append(
+        {
+            "id": watch_id,
+            "guild_id": ctx.guild.id,
+            "channel_id": ctx.channel.id,
+            "user_id": ctx.author.id,
+            "world": world,
+            "item_id": item_id,
+            "item_name": item_name,
+            "target_price": target_price,
+        }
+    )
+
+    try:
+        save_xiv_watches(watches)
+    except OSError as error:
+        print(f"Could not save XIV watch: {error}")
+        await ctx.send("I found the item, but could not save the market watch.")
+        return
+
+    await ctx.send(
+        f"Watching **{item_name}** on **{world}**.\n"
+        f"Current cheapest: **{market['price']:,} gil**\n"
+        f"Alert at: **{target_price:,} gil** or lower\n"
+        f"Watch ID: `{watch_id}`"
+    )
+
+
+@bot.command()
+async def xivwatches(ctx):
+    """List the caller's active FFXIV market alerts."""
+    watches = [
+        watch
+        for watch in load_xiv_watches()
+        if int(watch.get("user_id", 0)) == ctx.author.id
+    ]
+
+    if not watches:
+        await ctx.send("You have no active FFXIV market watches.")
+        return
+
+    lines = []
+
+    for watch in watches:
+        lines.append(
+            f"`{watch['id']}` — **{watch['item_name']}** "
+            f"on **{watch['world']}** <= "
+            f"**{int(watch['target_price']):,} gil**"
+        )
+
+    message = "**Your FFXIV market watches**\n" + "\n".join(lines)
+    await ctx.send(message[:2000])
+
+
+@bot.command()
+async def xivunwatch(ctx, watch_id: str):
+    """Remove one of the caller's FFXIV market alerts."""
+    watches = load_xiv_watches()
+
+    new_watches = [
+        watch
+        for watch in watches
+        if not (
+            str(watch.get("id", "")).casefold() == watch_id.casefold()
+            and int(watch.get("user_id", 0)) == ctx.author.id
+        )
+    ]
+
+    if len(new_watches) == len(watches):
+        await ctx.send("I could not find one of your watches with that ID.")
+        return
+
+    try:
+        save_xiv_watches(new_watches)
+    except OSError as error:
+        print(f"Could not remove XIV watch: {error}")
+        await ctx.send("I found that watch, but could not update the watch file.")
+        return
+
+    await ctx.send(f"Removed FFXIV market watch `{watch_id}`.")
 
 @bot.command()
 async def horserace(ctx):
