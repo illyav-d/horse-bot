@@ -44,6 +44,7 @@ CHANGELOG = [
     "The stable now has cleaner live sports coverage with actual commentary, technically.",
     "Added !forevercd to turn a selected text channel into a persistent WoW Forever launch countdown.",
     "WoW Forever countdown channels are now auto-detected after bot restarts, even if the saved config is missing.",
+    "Added Horsie to Railway, the horsie is now Mister WorldWide",
 ]
 
 HORSE_IMAGES = [
