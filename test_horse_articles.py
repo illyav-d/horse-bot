@@ -120,12 +120,16 @@ class ArticleCommandTests(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, *args):
                 pass
 
-        return SimpleNamespace(guild=SimpleNamespace(id=guild_id), send=AsyncMock(), typing=Typing)
+        status = SimpleNamespace(edit=AsyncMock())
+        return SimpleNamespace(guild=SimpleNamespace(id=guild_id), send=AsyncMock(return_value=status), typing=Typing, status=status)
 
     async def test_server_histories_and_exhaustion(self):
         newest = story("A cute pony makes friends", 1, "one")
         older = story("A playful foal explores a field", 30, "two")
-        with tempfile.TemporaryDirectory() as folder, patch.object(articles, "ARTICLE_HISTORY_FILE", Path(folder) / "seen.json"), patch.object(articles, "fetch_articles", AsyncMock(return_value=[older, newest])):
+        async def search(session, seen):
+            return articles.choose_article([older, newest], seen=seen)
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(articles, "ARTICLE_HISTORY_FILE", Path(folder) / "seen.json"), patch.object(articles, "find_live_article", AsyncMock(side_effect=search)):
             cog = articles.HorseArticles()
             one, two = self.context(1), self.context(2)
             with patch.object(articles, "datetime") as date:
@@ -134,12 +138,42 @@ class ArticleCommandTests(unittest.IsolatedAsyncioTestCase):
                 await cog.horsearticle.callback(cog, one)
                 await cog.horsearticle.callback(cog, two)
                 await cog.horsearticle.callback(cog, one)
-            self.assertEqual(one.send.await_args_list[0].kwargs["embed"].url, newest["url"])
-            self.assertEqual(one.send.await_args_list[1].kwargs["embed"].url, older["url"])
-            self.assertEqual(two.send.await_args_list[0].kwargs["embed"].url, newest["url"])
-            self.assertIn("run out", one.send.await_args_list[2].args[0])
+            self.assertEqual(one.status.edit.await_args_list[0].kwargs["embed"].url, newest["url"])
+            self.assertEqual(one.status.edit.await_args_list[1].kwargs["embed"].url, older["url"])
+            self.assertEqual(two.status.edit.await_args_list[0].kwargs["embed"].url, newest["url"])
+            self.assertIn("couldn't find", one.status.edit.await_args_list[2].kwargs["content"])
             self.assertEqual(articles.load_history()["1"], [newest["url"], older["url"]])
             self.assertEqual(articles.load_history()["2"], [newest["url"]])
+
+    async def test_searching_appears_before_search_and_result_edits_it(self):
+        current = story("Cute pony finds a friend", 1, "current")
+        ctx = self.context(1)
+
+        async def search(session, seen):
+            ctx.send.assert_awaited_once()
+            self.assertIn("Searching...", ctx.send.call_args.args[0])
+            return current
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(articles, "ARTICLE_HISTORY_FILE", Path(folder) / "seen.json"), patch.object(articles, "find_live_article", AsyncMock(side_effect=search)):
+            await articles.HorseArticles().horsearticle.callback(articles.HorseArticles(), ctx)
+            self.assertEqual(ctx.status.edit.call_args.kwargs["embed"].url, current["url"])
+
+    async def test_failed_result_edit_does_not_mark_seen(self):
+        current = story("Cute pony finds a friend", 1, "current")
+        ctx = self.context(1)
+        ctx.status.edit.side_effect = RuntimeError("Discord unavailable")
+        with tempfile.TemporaryDirectory() as folder, patch.object(articles, "ARTICLE_HISTORY_FILE", Path(folder) / "seen.json"), patch.object(articles, "find_live_article", AsyncMock(return_value=current)):
+            with self.assertRaises(RuntimeError):
+                cog = articles.HorseArticles()
+                await cog.horsearticle.callback(cog, ctx)
+            self.assertEqual(articles.load_history(), {})
+
+    async def test_search_timeout_replaces_searching_message(self):
+        ctx = self.context(1)
+        with patch.object(articles, "find_live_article", AsyncMock(side_effect=TimeoutError)), patch("builtins.print"):
+            cog = articles.HorseArticles()
+            await cog.horsearticle.callback(cog, ctx)
+        self.assertIn("Try again", ctx.status.edit.call_args.kwargs["content"])
 
     async def test_failed_send_does_not_mark_article_seen(self):
         current = story("Cute pony finds a friend", 1, "current")

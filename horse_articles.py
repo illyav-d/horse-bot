@@ -1,4 +1,4 @@
-"""Find recent, upbeat horse stories from full-text RSS feeds."""
+"""Search current feeds, archives, and full article pages for upbeat horse stories."""
 
 import asyncio
 import html
@@ -14,6 +14,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 from data_storage import data_path, write_json
+from horse_web import ArchiveLinks, SOURCES, fetch_html, normalize_url, parse_page
 
 
 FEEDS = (
@@ -21,12 +22,6 @@ FEEDS = (
     "https://www.horseandhound.co.uk/funny-horse-stuff/feed",
     "https://www.horsenation.com/feed/",
 )
-SOURCES = {
-    "horseandhound.co.uk": "Horse & Hound",
-    "www.horseandhound.co.uk": "Horse & Hound",
-    "horsenation.com": "Horse Nation",
-    "www.horsenation.com": "Horse Nation",
-}
 ARTICLE_HISTORY_FILE = data_path("HORSE_ARTICLE_FILE", "horse_articles.json")
 CONTENT_TAG = "{http://purl.org/dc/elements/1.1/}content"
 ENCODED_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
@@ -109,11 +104,11 @@ def parse_articles(xml_bytes):
 
 def choose_article(articles, now=None, seen=()):
     now = now or datetime.now(timezone.utc)
-    seen = set(seen)
+    seen = {normalize_url(url) for url in seen}
     eligible = []
     for article in articles:
         age_days = (now - article["published"]).total_seconds() / 86400
-        if not 0 <= age_days <= 365 or article["url"] in seen:
+        if not 0 <= age_days <= 365 or normalize_url(article["url"]) in seen:
             continue
         if not CUTE_TITLE.search(article["title"]):
             continue
@@ -161,7 +156,60 @@ async def fetch_articles(session):
 
 
 async def latest_cute_article(session, seen=()):
-    return choose_article(await fetch_articles(session), seen=seen)
+    return await find_live_article(session, seen)
+
+
+async def find_live_article(session, seen=()):
+    """Open current article pages, then walk archives beyond the RSS window."""
+    seen = {normalize_url(url) for url in seen}
+    checked = set(seen)
+    semaphore = asyncio.Semaphore(4)
+    remaining = 24
+
+    async def verify(candidates):
+        nonlocal remaining
+        urls = []
+        for candidate in candidates:
+            url = normalize_url(candidate["url"])
+            if (not url or url in checked or not CUTE_TITLE.search(candidate["title"])
+                    or HEAVY_CONTENT.search(candidate["title"])):
+                continue
+            checked.add(url)
+            urls.append(url)
+        for start in range(0, min(len(urls), remaining), 6):
+            batch = urls[start:start + min(6, remaining)]
+            remaining -= len(batch)
+            pages = await asyncio.gather(*(fetch_html(session, url, semaphore) for url in batch))
+            parsed = [article for page in pages if page and (article := parse_page(*page))]
+            if article := choose_article(parsed, seen=seen):
+                return article
+        return None
+
+    recent = await fetch_articles(session)
+    recent.sort(key=lambda article: article["published"], reverse=True)
+    if article := await verify(recent):
+        return article
+    for first_page in range(1, 13, 2):
+        if remaining <= 0:
+            break
+        urls = [
+            template.format(page=page)
+            for page in range(first_page, first_page + 2)
+            for template in (
+                "https://www.horsenation.com/page/{page}/",
+                "https://www.horseandhound.co.uk/funny-horse-stuff/page/{page}",
+            )
+        ]
+        pages = await asyncio.gather(*(fetch_html(session, url, semaphore) for url in urls))
+        candidates = []
+        for page in pages:
+            if page:
+                parser = ArchiveLinks(page[1])
+                parser.feed(page[0])
+                candidates.extend(parser.links)
+        if article := await verify(candidates):
+            return article
+    return None
 
 
 class HorseArticles(commands.Cog):
@@ -172,33 +220,36 @@ class HorseArticles(commands.Cog):
     @commands.cooldown(1, 15, commands.BucketType.user)
     @commands.guild_only()
     async def horsearticle(self, ctx):
-        """Find the latest light horse story: !horsearticle."""
-        try:
-            async with ctx.typing(), aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-                articles = await fetch_articles(session)
-        except (aiohttp.ClientError, TimeoutError) as error:
-            print(f"Could not fetch horse article: {error}")
-            await ctx.send("🐴 The horse news is taking a nap. Try again later.")
-            return
+        """Search live article pages for a light horse story: !horsearticle."""
+        status = await ctx.send("🐴 Searching... finding a happy horse story for you.")
         async with self.locks.setdefault(ctx.guild.id, asyncio.Lock()):
             history = load_history()
             server_key = str(ctx.guild.id)
             seen = history.get(server_key, [])
             if not isinstance(seen, list):
                 seen = []
-            article = choose_article(articles, seen=seen)
+            try:
+                async with ctx.typing(), aiohttp.ClientSession() as session:
+                    async with asyncio.timeout(55):
+                        article = await find_live_article(session, seen)
+            except (aiohttp.ClientError, TimeoutError) as error:
+                print(f"Could not finish horse article search: {error}")
+                await status.edit(content="🐴 The horse news is taking a nap. Try again later.")
+                return
             if article is None:
-                await ctx.send("🐴 I've run out of fresh, happy horse stories for this server. Try again when there's a new one.")
+                await status.edit(content="🐴 I couldn't find an unread happy horse story in this search. Try again later.")
                 return
             embed = discord.Embed(
                 title=article["title"][:256], url=article["url"],
                 description=(article["description"] or article["body"])[:300],
                 colour=0xE8B86D,
             )
-            embed.set_footer(text="Horse & Hound • Picked from recent articles")
+            embed.set_footer(text=f"{article.get('source', 'Horse & Hound')} • Read from the article page")
             embed.timestamp = article["published"]
-            await ctx.send("🐴 Found a nice horse story:", embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            history[server_key] = (seen + [article["url"]])[-200:]
+            await status.edit(content="🐴 Found a nice horse story:", embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            # Other servers may have completed a search while this one was reading.
+            history = load_history()
+            history[server_key] = seen + [article["url"]]
             try:
                 save_history(history)
             except OSError as error:
