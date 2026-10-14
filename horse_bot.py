@@ -16,6 +16,7 @@ from horse_reactions import HorseReactions
 from horse_articles import HorseArticles
 from game_commands import GameCommands
 from race_betting import collect_race_bets, winner_pages
+from data_storage import data_path, write_json
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -25,7 +26,7 @@ TRAMPLE_ALL_MAX_MESSAGES = int(os.getenv("TRAMPLE_ALL_MAX_MESSAGES", "1000"))
 
 # Local save file for carrot points.
 # This keeps scores even after the bot restarts.
-CARROT_FILE = Path(os.getenv("CARROT_FILE", "carrots.json"))
+CARROT_FILE = data_path("CARROT_FILE", "carrots.json")
 
 # Local save file for the WoW Forever countdown channel.
 # This lets the countdown resume automatically after a bot restart.
@@ -298,14 +299,13 @@ def load_carrots():
     try:
         with CARROT_FILE.open("r", encoding="utf-8") as file:
             return json.load(file)
-    except json.JSONDecodeError:
-        print("carrots.json was invalid. Starting with an empty carrot tracker.")
-        return {}
+    except json.JSONDecodeError as error:
+        # Do not overwrite a damaged scoreboard with an empty one after a win.
+        raise RuntimeError(f"Carrot save {CARROT_FILE} is invalid; restore a backup.") from error
 
 
 def save_carrots(data):
-    with CARROT_FILE.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
+    write_json(CARROT_FILE, data)
 
 
 def load_forever_config():

@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .env
 *.log
+carrots.json
+horse_articles.json
