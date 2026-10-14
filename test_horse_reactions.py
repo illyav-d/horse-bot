@@ -36,10 +36,26 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
             ("macaroni horses", False, None), ("premacaroni horse", False, None),
             ("!horse", False, None), ("macaroni horse", True, None),
             ("macaroni horse", False, 42),
+            ("shutup chelseas", False, None), ("shutup chelsea", True, None),
+            ("shutup chelsea", False, 42),
         ]:
             message = self.message(text, bot=bot, webhook=webhook)
             await HorseReactions().on_message(message)
             message.channel.send.assert_not_awaited()
+
+    async def test_rat_phrase_uploads_image_with_caption(self):
+        for text in ["shutup chelsea", "SHUTUP CHELSEA!", "please shut up   Chelsea"]:
+            with self.subTest(text=text):
+                message = self.message(text)
+
+                async def sent(*args, **kwargs):
+                    self.assertEqual(args, ("take this rat and relax",))
+                    self.assertEqual(kwargs["file"].filename, "rat_throw.jpg")
+                    self.assertEqual(kwargs["file"].fp.read(3), b"\xff\xd8\xff")
+
+                message.channel.send.side_effect = sent
+                await HorseReactions().on_message(message)
+                message.channel.send.assert_awaited_once()
 
     async def test_missing_asset_does_not_raise(self):
         message = self.message("macaroni horse")

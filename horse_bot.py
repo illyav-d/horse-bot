@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import uuid
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import quote
 import aiohttp
@@ -606,10 +607,19 @@ async def post_changelog_to_discord():
     lines = "\n".join(f"- {item}" for item in CHANGELOG)
 
     async def send_changelog(channel):
-        await channel.send(
-            f"**Horsie Bot v{VERSION} is online**\n"
-            f"**Changelog:**\n{lines}"
+        embed = discord.Embed(
+            title=f"Horsie Bot v{VERSION} is online",
+            description=f"**Changelog:**\n{lines}",
         )
+        if channel.permissions_for(channel.guild.me).attach_files:
+            embed.set_thumbnail(url="attachment://changelog_rat.gif")
+            with closing(discord.File(
+                Path(__file__).parent / "assets" / "changelog_rat.gif",
+                filename="changelog_rat.gif",
+            )) as rat:
+                await channel.send(embed=embed, file=rat)
+        else:
+            await channel.send(embed=embed)
 
     for guild in bot.guilds:
         await post_to_guild(guild, send_changelog)

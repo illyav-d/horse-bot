@@ -8,7 +8,8 @@ import horse_bot as h
 def channel(i, name="general", allowed=True):
     c = Mock(spec=discord.TextChannel)
     c.id, c.name = i, name
-    c.permissions_for.return_value = SimpleNamespace(view_channel=allowed, send_messages=allowed, embed_links=allowed)
+    c.guild = SimpleNamespace(me=object())
+    c.permissions_for.return_value = SimpleNamespace(view_channel=allowed, send_messages=allowed, embed_links=allowed, attach_files=allowed)
     c.send = AsyncMock()
     c.edit = AsyncMock()
     return c
@@ -31,6 +32,10 @@ async def main():
         await h.post_changelog_to_discord()
         c1.send.assert_awaited_once()
         c2.send.assert_awaited_once()
+        for posted in [c1, c2]:
+            payload = posted.send.call_args.kwargs
+            assert payload["embed"].thumbnail.url == "attachment://changelog_rat.gif"
+            assert payload["file"].filename == "changelog_rat.gif"
         with patch.object(h, "send_horse", AsyncMock()) as send:
             await h.post_daily_horse.coro()
             assert [call.args[0] for call in send.await_args_list] == [c1,c2]
