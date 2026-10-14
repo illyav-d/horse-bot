@@ -44,9 +44,12 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.8.4"
+VERSION = "1.8.5"
 
 CHANGELOG = [
+    "!horsearticle now reads live article pages and searches archives. More happy horse stories, fewer empty shelves.",
+    "Added Horse Nation stories and a Searching... message while Horsie reads. Shared stories stay remembered.",
+    "Carrots now survive bot updates. The snack treasury has a proper home.",
     "Horsie read a book. More horse facts.",
     "!horsearticle finds a happy horse story. If you've seen one already, Horsie digs up another.",
     "Say macaroni horse. You know what happens.",

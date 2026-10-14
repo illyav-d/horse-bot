@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.8.4**
+Current version: **1.8.5**
 
 ## Features
 
@@ -20,6 +20,12 @@ Current version: **1.8.4**
 - A kitchen horse photo whenever someone says "macaroni horse"
 - Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
 - On-demand light horse articles
+
+## Version 1.8.5
+
+- `!horsearticle` opens live article pages and searches archives beyond the current feeds, including Horse Nation. It shows **Searching...** while it reads and keeps filtering for light stories without repeats.
+- Carrot balances and article history use the attached Railway volume, so updates preserve progress. Old carrot snapshots are no longer shipped in Git, and saves are written atomically.
+- Added a standard Python entry point so hosting platforms can detect how to start Horsie.
 
 ## Version 1.8.4
 
