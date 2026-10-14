@@ -63,6 +63,7 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
                 await horse_bot.setup_hook()
             self.assertTrue(bot.extra_events.get("on_message"))
             self.assertIn("process_commands", bot.on_message.__func__.__code__.co_names)
+            self.assertIsNotNone(bot.get_command("horsearticle"))
 
 
 class TextTests(unittest.TestCase):

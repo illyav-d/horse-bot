@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.8.2**
+Current version: **1.8.4**
 
 ## Features
 
@@ -19,23 +19,32 @@ Current version: **1.8.2**
 - FFXIV NQ/HQ price trends from recent sales
 - A kitchen horse photo whenever someone says "macaroni horse"
 - Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
+- On-demand light horse articles
+
+## Version 1.8.4
+
+- Horsie read a book. More horse facts.
+- Added 30 facts about whiskers, colours, movement, ponies, and horse behaviour. Tidied up a few duplicate or questionable older claims.
+- New fact references are listed in [HORSE_FACT_SOURCES.md](HORSE_FACT_SOURCES.md). Facts appear in both `!horsefact` and horse posts through the existing shuffled rotation.
+
+## Version 1.8.3
+
+- `!horsearticle` finds a happy horse story. If you've seen one already, Horsie digs up another.
 
 ## Version 1.8.2
 
-- Say `macaroni horse` anywhere in a message to post the bundled kitchen horse photo. Matching ignores capitalization and accepts extra whitespace. Bot and webhook messages are ignored.
-- Added text variants to horse posts, facts, carrot replies, race betting announcements, and Horsejack. Each message category avoids repeating its previous line.
+- Say `macaroni horse`. You know what happens.
+- Gave Horsie a few more things to say. He was repeating himself.
 
 ## Version 1.8.1
 
-- One active horse race per channel; other channels and servers can race independently.
-- Horse picks are collected continuously, even while Discord is updating the betting board. The board refreshes every two seconds instead of sending a message and reaction for every pick. Each player can change their pick until betting closes.
-- Kept retail character cards and price trends. Removed Classic cards and FF Logs raid recaps for now; no API client IDs or secrets are needed for the remaining commands.
+- One race at a time per channel now. Four horses were enough chaos.
+- Fixed picks getting missed when everyone answered at once. You can change your pick until bets close.
+- `!wow` checks retail characters. `!xivtrend` checks FFXIV prices. Classic cards and raid recaps can wait.
 
 ## Version 1.7.1
 
-- Changelogs and daily horses now post in every server, using the first text channel in the server channel list where Horsie can view the channel, send messages, and embed links. If a send fails, Horsie tries the next eligible channel.
-- Daily horses are posted at 09:00 UTC. `DISCORD_CHANNEL_ID` is no longer required or used.
-- WoW Forever countdowns are saved and updated separately for each server.
+- Daily horses, changelogs and the Forever countdown now work across servers. Horsie has discovered sharing.
 
 ## Commands
 
@@ -58,6 +67,13 @@ Current version: **1.8.2**
 | `!wow <region> <realm> <character>` | Retail WoW character card via Raider.IO |
 | `!xivtrend <world/DC> <item> [--hq or --nq]` | Compares recent sale prices and current listings; defaults to NQ |
 | `macaroni horse` (no prefix) | Posts the kitchen horse photo |
+| `!horsearticle` | Finds the latest suitable light horse story |
+
+## Horse Articles
+
+Run `!horsearticle` in a server channel where Horsie can reply. It reads the [Horse & Hound](https://www.horseandhound.co.uk/) news and funny horse feeds, selects the newest unposted article from the past year with a positive headline, and screens its full feed text for death, injury, abuse, and other heavy topics. It sends the title, a short description, the original link, and the publication date. No API key or automatic posting is required.
+
+Each server keeps its own list of shared article links in `horse_articles.json` (set `HORSE_ARTICLE_FILE` to change the location). If nothing new passes the checks, Horsie says so rather than repeating a link or sharing a questionable story. The filters are intentionally conservative; they can miss a nice article, and automated screening cannot guarantee every linked page will be free of upsetting material.
 
 ## Macaroni Horse
 
@@ -158,6 +174,7 @@ The bot reads configuration from environment variables.
 | `CARROT_FILE` | No | Path to carrot data; default is `carrots.json` |
 | `FOREVER_CONFIG_FILE` | No | Path to WoW countdown config; default is `forever_countdown.json` |
 | `XIV_WATCH_FILE` | No | Path to FFXIV market watches; default is `xiv_watches.json` |
+| `HORSE_ARTICLE_FILE` | No | Path to per-server shared article history; default is `horse_articles.json` |
 
 Never commit your Discord bot token to GitHub.
 
@@ -228,6 +245,7 @@ Recommended variables:
 CARROT_FILE=/data/carrots.json
 FOREVER_CONFIG_FILE=/data/forever_countdown.json
 XIV_WATCH_FILE=/data/xiv_watches.json
+HORSE_ARTICLE_FILE=/data/horse_articles.json
 ```
 
 ## Discord Permissions
@@ -262,7 +280,7 @@ Horsie Bot is an independent hobby project and is not affiliated with Discord, S
 ## Tests
 
 ```text
-python -m unittest test_game_commands test_race_betting test_horse_reactions
+python -m unittest test_game_commands test_race_betting test_horse_reactions test_horse_articles
 python test_multiserver.py
 ```
 

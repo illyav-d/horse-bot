@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 from datetime import datetime, time, timezone
 from bot_text import line
 from horse_reactions import HorseReactions
+from horse_articles import HorseArticles
 from game_commands import GameCommands
 from race_betting import collect_race_bets, winner_pages
 
@@ -41,17 +42,17 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.8.2"
+VERSION = "1.8.4"
 
 CHANGELOG = [
-    "Say macaroni horse to summon the stable chef, complete with the kitchen horse photo.",
-    "Added more varied horse posts, facts, carrot replies, race announcements, and Horsejack commentary.",
-    "Horse races now allow only one active race per channel.",
-    "Simultaneous horse picks are collected continuously, with a live betting board instead of per-pick spam.",
-    "Your latest pick counts until betting closes; all winning players still receive a carrot.",
-    "Kept retail !wow cards and !xivtrend price trends, with no API keys needed.",
-    "Removed Classic character cards and FF Logs recaps for now.",
-    "Daily horses, changelogs, and WoW Forever countdowns support multiple servers.",
+    "Horsie read a book. More horse facts.",
+    "!horsearticle finds a happy horse story. If you've seen one already, Horsie digs up another.",
+    "Say macaroni horse. You know what happens.",
+    "Gave Horsie a few more things to say. He was repeating himself.",
+    "One race at a time per channel now. Four horses were enough chaos.",
+    "Fixed picks getting missed when everyone answered at once. You can change your pick until bets close.",
+    "!wow checks retail characters. !xivtrend checks FFXIV prices. Classic cards and raid recaps can wait.",
+    "Daily horses, changelogs and the Forever countdown now work across servers. Horsie has discovered sharing.",
 ]
 
 
@@ -120,11 +121,8 @@ HORSE_FACTS = [
     'This horse believes in you.',
     'Due to the placement of their eyes, horses possess an impressive 340 to 350-degree range of vision.',
     'While humans have only three ear muscles, horses have 10, allowing them to rotate their ears 180 degrees independently.',
-    'Horses have larger eyes by volume than any other land-dwelling mammal on earth.',
     'Male horses are among the very few male mammals that do not possess nipples.',
     "A horse's brain weighs only about 22 ounces, which is roughly half the weight of a human brain.",
-    'Horses are obligate nasal breathers, meaning they can only breathe through their noses and cannot use their mouths to inhale air.',
-    'Because of a tight, one-way valve in their esophagus, it is physically impossible for a horse to burp or vomit.',
     'Horses do not produce saliva automatically and must chew to generate it, producing up to 11 gallons daily.',
     'Just like humans, equines with pale pink skin can easily get a painful sunburn.',
     "Foals are born with a soft, rubbery layer over their hooves to protect the mother's birth canal from injury.",
@@ -132,13 +130,41 @@ HORSE_FACTS = [
     'Horses can read human facial expressions and remember your past emotional state.',
     'Certain heavily feathered draft breeds, like the Gypsy Vanner, are genetically capable of growing full mustaches.',
     'When horses curl up their upper lip to look like they are laughing, they are actually gathering scents.',
-    "A horse's ears point where its eyes look; pointing in two directions means it is looking at two things at once.",
-    'To stay safe from predators, a herd will never sleep lying down all at the same time.',
     "Studies show that pumping lavender-scented air into a stable significantly lowers a horse's elevated heart rate.",
     'The earliest ancestor of the horse was the Eohippus, a small jungle creature the size of a Golden Retriever.',
     'Over millions of years of evolution, horses shifted from walking on multiple toes to standing entirely on a single central digit.',
     'The longest-living horse on official record was named Old Billy, who survived to the remarkable age of 62.',
-    'The Przewalski’s horse is the only true wild horse species left, as all other wild herds are actually feral.',
+    # Sources for the additions below: HORSE_FACT_SOURCES.md.
+    'A horse\'s whiskers are sensory hairs, not just impressive facial decorations.',
+    'Whiskers help horses sense objects in the blind spots right around their muzzle.',
+    'The follicles around horse whiskers have more nerve connections than ordinary hair follicles.',
+    'Whiskers around a horse\'s eyelids can trigger a protective blink when they touch something.',
+    'Horses can use their whiskers to investigate the texture of food.',
+    'A horse\'s walk has a four-beat rhythm: each hoof lands separately.',
+    'A trot has two beats, with the legs moving in diagonal pairs.',
+    'In a trot, the left front and right hind legs move as a pair, then the other diagonal pair follows.',
+    'A canter normally has a three-beat rhythm.',
+    'A gallop has four beats, unlike the usual three beats of a canter.',
+    'Horse coats have three basic colour backgrounds: chestnut, bay, and black.',
+    'Bay horses have a brownish body with black points, including the mane and tail.',
+    'Chestnut horses have reddish coats and do not have true black points.',
+    'A palomino has a golden coat with a light-coloured mane and tail.',
+    'A white marking on a horse\'s forehead is called a star, even when it is not star-shaped.',
+    'A small white marking around a horse\'s muzzle is called a snip.',
+    'White markings on a horse\'s legs are often described as socks or stockings.',
+    'Grey horses can be born dark and grow more white hairs as they age.',
+    'Lipizzan horses are usually born dark, even though many become nearly white as adults.',
+    'The UK Shetland Pony Stud-Book Society sets an adult height limit of 42 inches, or about 107 centimetres.',
+    'In the UK Shetland breed registry, ponies measuring 34 inches or less are classed as Miniatures.',
+    'Shetland ponies are used for driving carriages as well as for riding.',
+    'A winter coat helps a horse stay warm by trapping a layer of air close to its body.',
+    'Changes in daylight help control when horses grow and shed their seasonal coats.',
+    'Microbes fermenting forage in a horse\'s gut produce heat, helping keep the horse warm.',
+    'Horses groom one another, using their teeth to scratch places a friend cannot easily reach.',
+    'Horses can recognise a familiar person by combining information from their face and voice.',
+    'Experiments have shown that horses respond to emotional cues in human voices as well as faces.',
+    'Horses can also respond differently to different human body postures.',
+    'Horse welfare groups describe three everyday essentials as the three Fs: friends, forage, and freedom.',
 ]
 
 HORSE_RACE_NAMES = [
@@ -812,6 +838,7 @@ async def before_daily_loop():
 async def setup_hook():
     await bot.add_cog(GameCommands(bot, find_xiv_item))
     await bot.add_cog(HorseReactions())
+    await bot.add_cog(HorseArticles())
 
 
 @bot.event
