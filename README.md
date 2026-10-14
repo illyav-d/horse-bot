@@ -71,9 +71,11 @@ Current version: **1.8.4**
 
 ## Horse Articles
 
-Run `!horsearticle` in a server channel where Horsie can reply. It reads the [Horse & Hound](https://www.horseandhound.co.uk/) news and funny horse feeds, selects the newest unposted article from the past year with a positive headline, and screens its full feed text for death, injury, abuse, and other heavy topics. It sends the title, a short description, the original link, and the publication date. No API key or automatic posting is required.
+Run `!horsearticle` in a server channel where Horsie can reply. Horsie immediately posts **Searching...**, then replaces that message with the result. Each request checks current [Horse & Hound](https://www.horseandhound.co.uk/) and [Horse Nation](https://www.horsenation.com/) stories online, opens the actual article pages, and searches their archives when the current feed entries have been read or are unsuitable. It can find photo challenges, comics, videos, and other light horse stories beyond the RSS window. No API key or automatic posting is required.
 
-Each server keeps its own list of shared article links in `horse_articles.json` (set `HORSE_ARTICLE_FILE` to change the location). If nothing new passes the checks, Horsie says so rather than repeating a link or sharing a questionable story. The filters are intentionally conservative; they can miss a nice article, and automated screening cannot guarantee every linked page will be free of upsetting material.
+The bot checks article text for death, injury, abuse, and other heavy topics before sharing a link, and keeps the past-year date filter. It skips paywalled pages and pages without enough readable article text. Navigation, adverts, and unrelated sidebar stories are excluded from the text check. Searches last at most 55 seconds, examine at most 24 article pages, and can walk up to 12 archive pages per site. Slow or unavailable pages are skipped; a timeout replaces the searching message with a retry message.
+
+Each server keeps its own list of shared article links in `horse_articles.json` (set `HORSE_ARTICLE_FILE` to change the location). Links are only recorded after the result is successfully shown, and older history is retained to avoid repeats. If nothing unread passes the checks within the search limits, Horsie says so. The filters are intentionally conservative; they can miss a nice article, and automated screening cannot guarantee every linked page will be free of upsetting material.
 
 ## Macaroni Horse
 
@@ -171,10 +173,10 @@ The bot reads configuration from environment variables.
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |
-| `CARROT_FILE` | No | Path to carrot data; default is `carrots.json` |
+| `CARROT_FILE` | No | Path to carrot data; defaults to `carrots.json` on the attached Railway volume, or locally when no volume is attached |
 | `FOREVER_CONFIG_FILE` | No | Path to WoW countdown config; default is `forever_countdown.json` |
 | `XIV_WATCH_FILE` | No | Path to FFXIV market watches; default is `xiv_watches.json` |
-| `HORSE_ARTICLE_FILE` | No | Path to per-server shared article history; default is `horse_articles.json` |
+| `HORSE_ARTICLE_FILE` | No | Path to per-server shared article history; defaults to `horse_articles.json` on the attached Railway volume, or locally when no volume is attached |
 
 Never commit your Discord bot token to GitHub.
 
@@ -233,6 +235,10 @@ The bot currently stores carrots, countdown configuration, and FFXIV watches in 
 
 Containers can be replaced during deployments, so use a Railway Volume if you want this data to survive redeployments.
 
+Carrot balances and article history automatically use `RAILWAY_VOLUME_MOUNT_PATH` when a volume is attached. Explicit `CARROT_FILE` and `HORSE_ARTICLE_FILE` settings take priority. Carrot scores are runtime data excluded from Git; deployments no longer ship old balances. Saves are written to a temporary file and replaced atomically, and invalid carrot data raises an error rather than silently discarding scores.
+
+When moving an existing bot to a volume, back up its live `carrots.json` and `horse_articles.json` and upload them to the volume before deploying. A new empty save starts with zero carrots; attaching a volume cannot recover previously lost wins automatically.
+
 Example volume mount:
 
 ```text
@@ -280,7 +286,7 @@ Horsie Bot is an independent hobby project and is not affiliated with Discord, S
 ## Tests
 
 ```text
-python -m unittest test_game_commands test_race_betting test_horse_reactions test_horse_articles
+python -m unittest test_game_commands test_race_betting test_horse_reactions test_horse_articles test_horse_web test_carrot_storage
 python test_multiserver.py
 ```
 
