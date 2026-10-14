@@ -1,27 +1,33 @@
-"""Find recent, upbeat horse stories from a feed that includes article text."""
+"""Find recent, upbeat horse stories from full-text RSS feeds."""
 
 import asyncio
 import html
 import json
-import os
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from pathlib import Path
 from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import aiohttp
 import discord
 from discord.ext import commands
+from data_storage import data_path, write_json
 
 
 FEEDS = (
     "https://www.horseandhound.co.uk/feed",
     "https://www.horseandhound.co.uk/funny-horse-stuff/feed",
+    "https://www.horsenation.com/feed/",
 )
-ARTICLE_HISTORY_FILE = Path(os.getenv("HORSE_ARTICLE_FILE", "horse_articles.json"))
+SOURCES = {
+    "horseandhound.co.uk": "Horse & Hound",
+    "www.horseandhound.co.uk": "Horse & Hound",
+    "horsenation.com": "Horse Nation",
+    "www.horsenation.com": "Horse Nation",
+}
+ARTICLE_HISTORY_FILE = data_path("HORSE_ARTICLE_FILE", "horse_articles.json")
 CONTENT_TAG = "{http://purl.org/dc/elements/1.1/}content"
 ENCODED_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
 
@@ -30,7 +36,7 @@ CUTE_TITLE = re.compile(
     r"\b(?:cute|adorable|funny|foal|baby|playful|playing|friendship|friends|"
     r"best friend|fell in love|loves?|princess|heartwarming|joyful|delightful|"
     r"sweet|cuddles?|hugs?|naughty|bond|birthday|surprise|charming|cheeky|"
-    r"pony.mad)\b",
+    r"pony.mad|reader photo challenge|the idea of order|tuesday video)\b",
     re.IGNORECASE,
 )
 
@@ -41,7 +47,8 @@ HEAVY_CONTENT = re.compile(
     r"passed away|pass away|loss of life|tragic|tragedy|fatal\w*|"
     r"slaughter\w*|abuse\w*|neglect\w*|cruelty|injur\w*|"
     r"suffer\w*|illness\w*|sick|disease\w*|cancer|colic|"
-    r"accident\w*|crash\w*|rescue\w*|abandon\w*)\b",
+    r"accident\w*|crash\w*|rescue\w*|abandon\w*|memorial|"
+    r"remembering|rest easy|rest in peace|farewell)\b",
     re.IGNORECASE,
 )
 
@@ -72,7 +79,7 @@ def plain_text(markup):
 
 
 def parse_articles(xml_bytes):
-    root = ElementTree.fromstring(xml_bytes)
+    root = ElementTree.fromstring(xml_bytes.strip())
     articles = []
     for item in root.findall("./channel/item"):
         title = plain_text(item.findtext("title"))
@@ -81,7 +88,7 @@ def parse_articles(xml_bytes):
         if not published or not url:
             continue
         parsed_url = urlparse(url)
-        if parsed_url.scheme != "https" or parsed_url.hostname not in {"horseandhound.co.uk", "www.horseandhound.co.uk"}:
+        if parsed_url.scheme != "https" or parsed_url.hostname not in SOURCES:
             continue
         try:
             published_at = parsedate_to_datetime(published).astimezone(timezone.utc)
@@ -95,6 +102,7 @@ def parse_articles(xml_bytes):
         articles.append({
             "title": title, "url": url, "published": published_at,
             "body": body, "description": description,
+            "source": SOURCES[parsed_url.hostname],
         })
     return articles
 
@@ -128,24 +136,27 @@ def load_history():
 
 
 def save_history(data):
-    ARTICLE_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with ARTICLE_HISTORY_FILE.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
+    write_json(ARTICLE_HISTORY_FILE, data)
 
 
 async def fetch_articles(session):
-    articles = {}
-    for url in FEEDS:
+    async def fetch_feed(url):
         try:
-            async with session.get(url) as response:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=10),
+                headers={"User-Agent": "HorsieBot/1.8 (horse story RSS reader)"},
+            ) as response:
                 response.raise_for_status()
                 data = await response.read()
                 if len(data) > 2_000_000:
-                    continue
-            for article in parse_articles(data):
-                articles[article["url"]] = article
-        except (aiohttp.ClientError, ValueError, ElementTree.ParseError, UnicodeError) as error:
+                    return []
+            return parse_articles(data)
+        except (aiohttp.ClientError, TimeoutError, ValueError, ElementTree.ParseError, UnicodeError) as error:
             print(f"Could not read horse article feed {url}: {error}")
+            return []
+
+    batches = await asyncio.gather(*(fetch_feed(url) for url in FEEDS))
+    articles = {article["url"]: article for batch in batches for article in batch}
     return list(articles.values())
 
 

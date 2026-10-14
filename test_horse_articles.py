@@ -54,8 +54,62 @@ class ArticleFilterTests(unittest.TestCase):
         self.assertEqual(len(parsed), 1)
         self.assertIsNone(articles.choose_article(parsed, NOW))
 
+    def test_horse_nation_full_text_source_and_light_series(self):
+        body = "Enjoy these photos of ponies playing together in the pasture. " * 8
+        xml = f'''\n<?xml version="1.0" encoding="UTF-8"?>
+        <rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>
+        <title>Reader Photo Challenge: Draft Horses</title>
+        <link>https://www.horsenation.com/2026/10/14/draft-horses/</link>
+        <pubDate>{format_datetime(NOW)}</pubDate>
+        <content:encoded><![CDATA[<p>{body}</p>]]></content:encoded>
+        </item></channel></rss>'''
+        parsed = articles.parse_articles(xml.encode())
+        self.assertEqual(parsed[0]["source"], "Horse Nation")
+        self.assertIsNotNone(articles.choose_article(parsed, NOW))
+        parsed[0]["body"] += " Remembering a horse who passed away."
+        self.assertIsNone(articles.choose_article(parsed, NOW))
+
+    def test_horse_nation_lookalike_host_is_rejected(self):
+        body = "A cute pony plays in a sunny field. " * 10
+        xml = f'''<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>
+        <title>A cute pony</title><link>https://www.horsenation.com.evil.example/story</link>
+        <pubDate>{format_datetime(NOW)}</pubDate><content:encoded>{body}</content:encoded>
+        </item></channel></rss>'''
+        self.assertEqual(articles.parse_articles(xml.encode()), [])
+
 
 class ArticleCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_feed_timeout_preserves_other_feed_articles(self):
+        body = "Enjoy these photos of playful ponies in a sunny field. " * 8
+        xml = f'''<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>
+        <title>Reader Photo Challenge: Ponies</title><link>https://www.horsenation.com/ponies/</link>
+        <pubDate>{format_datetime(NOW)}</pubDate><content:encoded>{body}</content:encoded>
+        </item></channel></rss>'''.encode()
+
+        class Response:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+            async def read(self):
+                return xml
+
+        class Session:
+            def get(self, url, **kwargs):
+                if "horseandhound" in url:
+                    raise TimeoutError("feed unavailable")
+                return Response()
+
+        with patch("builtins.print"):
+            results = await articles.fetch_articles(Session())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["source"], "Horse Nation")
+
     def context(self, guild_id):
         typing = SimpleNamespace(__aenter__=None)
 
