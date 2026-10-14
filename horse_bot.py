@@ -10,9 +10,12 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, time, timezone
+from bot_text import line
+from horse_reactions import HorseReactions
+from game_commands import GameCommands
+from race_betting import collect_race_bets, winner_pages
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
 # Safety cap for !trample all.
 # You can change this in your environment variables if needed.
@@ -38,23 +41,19 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.7.0"
+VERSION = "1.8.2"
 
 CHANGELOG = [
-    "Upgraded !horserace into a visual ASCII horse race.",
-    "Players can now pick a horse and watch the race move across the track.",
-    "The race board edits one message instead of reposting the ASCII art every round.",
-    "Race narration now builds up as a visible event log under the track.",
-    "Added random ASCII race events like carrot boosts, bucket delays, and suspicious speed.",
-    "Correct guesses in !horserace still earn 1 carrot.",
-    "The stable now has cleaner live sports coverage with actual commentary, technically.",
-    "Added !forevercd to turn a selected text channel into a persistent WoW Forever launch countdown.",
-    "WoW Forever countdown channels are now auto-detected after bot restarts, even if the saved config is missing.",
-    "Added Horsie to Railway, the horsie is now Mister WorldWide",
-    "Added !xivprice for live FFXIV market-board price checks via Universalis.",
-    "Added !xivwatch, !xivwatches, and !xivunwatch for persistent market price alerts.",
-    "Added a background FFXIV market watcher that checks active alerts every 5 minutes.",
+    "Say macaroni horse to summon the stable chef, complete with the kitchen horse photo.",
+    "Added more varied horse posts, facts, carrot replies, race announcements, and Horsejack commentary.",
+    "Horse races now allow only one active race per channel.",
+    "Simultaneous horse picks are collected continuously, with a live betting board instead of per-pick spam.",
+    "Your latest pick counts until betting closes; all winning players still receive a carrot.",
+    "Kept retail !wow cards and !xivtrend price trends, with no API keys needed.",
+    "Removed Classic character cards and FF Logs recaps for now.",
+    "Daily horses, changelogs, and WoW Forever countdowns support multiple servers.",
 ]
+
 
 HORSE_IMAGES = [
     'https://i.imgur.com/LgWcwzG.png',
@@ -66,13 +65,6 @@ HORSE_IMAGES = [
     'https://t4.ftcdn.net/jpg/02/94/38/37/240_F_294383771_S19Z1L8xqo2Gii4wF3o4CssWpKS64M5N.jpg',
     'https://media.istockphoto.com/id/2057941107/photo/horse-with-curious-smile.jpg',
     'https://media.istockphoto.com/id/1300980030/photo/curious-brown-colt-looks-into-camera-while-grazing-on-a-sunny-day.jpg',
-]
-
-HORSE_CAPTIONS = [
-    'Daily horse delivery.',
-    'Horse of the day.',
-    'A horse has arrived.',
-    'Neigh.',
 ]
 
 HORSE_FACTS = [
@@ -306,28 +298,33 @@ def load_forever_config():
     return data
 
 
-def save_forever_config(channel_id):
-    data = {"channel_id": int(channel_id)}
+def save_forever_config(guild_id, channel_id):
+    data = load_forever_config()
+    data.setdefault("channels", {})[str(guild_id)] = int(channel_id)
+    FOREVER_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     with FOREVER_CONFIG_FILE.open("w", encoding="utf-8") as file:
         json.dump(data, file, indent=4)
 
 
-def get_forever_channel_id():
+def get_forever_channel_id(guild):
     data = load_forever_config()
 
     try:
-        return int(data.get("channel_id", 0))
+        channel_id = int(data.get("channels", {}).get(str(guild.id), 0))
+        if channel_id:
+            return channel_id
+        legacy_id = int(data.get("channel_id", 0))
+        return legacy_id if guild.get_channel(legacy_id) is not None else 0
     except (TypeError, ValueError):
         return 0
 
 
-def find_existing_forever_countdown_channel():
+def find_existing_forever_countdown_channel(guild):
     """Find an existing WoW Forever countdown channel by its generated name."""
-    for guild in bot.guilds:
-        for channel in guild.text_channels:
-            if FOREVER_CHANNEL_PATTERN.fullmatch(channel.name):
-                return channel
+    for channel in guild.text_channels:
+        if FOREVER_CHANNEL_PATTERN.fullmatch(channel.name):
+            return channel
 
     return None
 
@@ -559,26 +556,45 @@ def render_horserun(race_horses, positions, event_text=None):
     return "```text\n" + "\n".join(lines).strip() + "\n```"
 
 
+def get_post_channels(guild):
+    if guild.me is None:
+        return []
+    return [
+        channel for channel in guild.text_channels
+        if (permissions := channel.permissions_for(guild.me)).view_channel
+        and permissions.send_messages and permissions.embed_links
+    ]
+
+
+async def post_to_guild(guild, sender):
+    for channel in get_post_channels(guild):
+        try:
+            await sender(channel)
+            return
+        except discord.HTTPException as error:
+            print(f"Could not post in server {guild.id}, channel {channel.id}: {error}")
+    print(f"No usable posting channel in server {guild.id}.")
+
+
 async def post_changelog_to_discord():
-    channel = bot.get_channel(CHANNEL_ID)
-    if channel is None:
-        print(f"Could not find channel {CHANNEL_ID} for changelog post")
-        return
-
     lines = "\n".join(f"- {item}" for item in CHANGELOG)
-    await channel.send(
-        f"**Horsie Bot v{VERSION} is online**\n"
-        f"**Changelog:**\n{lines}"
-    )
 
+    async def send_changelog(channel):
+        await channel.send(
+            f"**Horsie Bot v{VERSION} is online**\n"
+            f"**Changelog:**\n{lines}"
+        )
+
+    for guild in bot.guilds:
+        await post_to_guild(guild, send_changelog)
 
 async def send_horse(channel):
     image = random.choice(HORSE_IMAGES)
-    caption = random.choice(HORSE_CAPTIONS)
+    caption = line("horse_caption")
     fact = get_next_fact()
 
     embed = discord.Embed(
-        title="Horse of the Day",
+        title=line("horse_title"),
         description=f"{caption}\n\n**Horse fact:** {fact}",
     )
     embed.set_image(url=image)
@@ -692,56 +708,27 @@ def get_forever_countdown_name():
 
 @tasks.loop(minutes=10)
 async def update_forever_countdown():
-    channel_id = get_forever_channel_id()
-    channel = bot.get_channel(channel_id) if channel_id else None
-
-    # Recovery path for restarts, fresh deployments, or a missing/stale config file.
-    # The generated countdown channel name becomes the fallback source of truth.
-    if channel is None:
-        channel = find_existing_forever_countdown_channel()
-
+    new_name = get_forever_countdown_name()
+    for guild in bot.guilds:
+        channel_id = get_forever_channel_id(guild)
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if not isinstance(channel, discord.TextChannel):
+            channel = find_existing_forever_countdown_channel(guild)
         if channel is None:
-            if channel_id:
-                print(
-                    f"Forever countdown channel {channel_id} could not be found, "
-                    "and no wow-forever countdown channel was detected."
-                )
-            return
-
-        print(
-            f"Recovered WoW Forever countdown channel from its name: "
-            f"{channel.name} ({channel.id})"
-        )
+            continue
 
         try:
-            save_forever_config(channel.id)
+            save_forever_config(guild.id, channel.id)
         except OSError as error:
-            # Recovery still works for this process even if the config cannot be written.
-            print(f"Could not save recovered Forever countdown config: {error}")
+            print(f"Could not save countdown for server {guild.id}: {error}")
 
-    if not isinstance(channel, discord.TextChannel):
-        print(f"Forever countdown channel {channel.id} is not a text channel.")
-        return
-
-    new_name = get_forever_countdown_name()
-
-    # Avoid unnecessary API calls when the visible countdown has not changed.
-    if channel.name == new_name:
-        return
-
-    try:
-        await channel.edit(
-            name=new_name,
-            reason="WoW Forever launch countdown",
-        )
-        print(f"Forever countdown updated: {new_name}")
-    except discord.Forbidden:
-        print(
-            f"Missing Manage Channels permission for countdown channel {channel.id}."
-        )
-    except discord.HTTPException as error:
-        print(f"Could not update countdown channel {channel.id}: {error}")
-
+        if channel.name == new_name:
+            continue
+        try:
+            await channel.edit(name=new_name, reason="WoW Forever launch countdown")
+            print(f"Forever countdown updated in server {guild.id}: {new_name}")
+        except discord.HTTPException as error:
+            print(f"Could not update countdown in server {guild.id}: {error}")
 
 @update_forever_countdown.before_loop
 async def before_forever_countdown():
@@ -813,17 +800,18 @@ async def before_xiv_market():
 
 @tasks.loop(time=time(hour=9, minute=0, tzinfo=timezone.utc))
 async def post_daily_horse():
-    channel = bot.get_channel(CHANNEL_ID)
-    if channel is None:
-        print(f"Could not find channel {CHANNEL_ID}")
-        return
-
-    await send_horse(channel)
-
+    for guild in bot.guilds:
+        await post_to_guild(guild, send_horse)
 
 @post_daily_horse.before_loop
 async def before_daily_loop():
     await bot.wait_until_ready()
+
+
+@bot.event
+async def setup_hook():
+    await bot.add_cog(GameCommands(bot, find_xiv_item))
+    await bot.add_cog(HorseReactions())
 
 
 @bot.event
@@ -849,7 +837,7 @@ async def horse(ctx):
 
 @bot.command()
 async def horsefact(ctx):
-    await ctx.send(f"Horse fact: {get_next_fact()}")
+    await ctx.send(f"{line('fact_intro')}: {get_next_fact()}")
 
 
 @bot.command()
@@ -858,9 +846,9 @@ async def carrots(ctx, member: discord.Member = None):
     count = get_carrot_count(member.id)
 
     if member.id == ctx.author.id:
-        await ctx.send(f"🥕 You have **{count}** carrot(s).")
+        await ctx.send(line("carrots_self", count=count))
     else:
-        await ctx.send(f"🥕 **{member.display_name}** has **{count}** carrot(s).")
+        await ctx.send(line("carrots_other", name=discord.utils.escape_markdown(member.display_name), count=count))
 
 
 @bot.command()
@@ -868,7 +856,7 @@ async def leaderboard(ctx):
     leaders = get_leaderboard()
 
     if not leaders:
-        await ctx.send("🥕 The carrot leaderboard is empty. Win a game to earn the first carrot!")
+        await ctx.send(line("empty_leaderboard"))
         return
 
     lines = []
@@ -1050,62 +1038,16 @@ async def xivunwatch(ctx, watch_id: str):
     await ctx.send(f"Removed FFXIV market watch `{watch_id}`.")
 
 @bot.command()
+@commands.max_concurrency(1, per=commands.BucketType.channel, wait=False)
 async def horserace(ctx):
     if len(HORSE_RACE_NAMES) < 4:
         await ctx.send("🐴 Not enough horses are registered for the race.")
         return
 
     race_horses = random.sample(HORSE_RACE_NAMES, 4)
-    bets = {}
+    bets = await collect_race_bets(bot, ctx, race_horses)
 
-    horse_list = "\n".join(
-        f"{index + 1}. **{name}**"
-        for index, name in enumerate(race_horses)
-    )
-
-    await ctx.send(
-        "🏇 **Horse Race!**\n\n"
-        "Pick your horse by typing a number from **1** to **4**.\n"
-        "This race has a tiny ASCII track and terrible sports journalism.\n"
-        "Correct guesses earn 🥕 **1 carrot**.\n\n"
-        f"{horse_list}\n\n"
-        "You have **20 seconds** to place your bets!"
-    )
-
-    def bet_check(message):
-        return (
-            message.channel == ctx.channel
-            and not message.author.bot
-            and message.content.strip() in ["1", "2", "3", "4"]
-        )
-
-    end_time = asyncio.get_event_loop().time() + 20
-
-    while asyncio.get_event_loop().time() < end_time:
-        timeout = max(0.1, min(2, end_time - asyncio.get_event_loop().time()))
-
-        try:
-            message = await bot.wait_for("message", timeout=timeout, check=bet_check)
-        except asyncio.TimeoutError:
-            continue
-
-        choice = int(message.content.strip())
-        bets[message.author.id] = {
-            "user_id": message.author.id,
-            "name": message.author.display_name,
-            "choice": choice,
-        }
-
-        chosen_horse = race_horses[choice - 1]
-
-        try:
-            await message.add_reaction("🏇")
-        except discord.HTTPException:
-            pass
-
-        await ctx.send(f"🎟️ **{message.author.display_name}** bets on **#{choice} {chosen_horse}**!")
-
-    await ctx.send("🔔 Bets are closed! The horses are being gently convinced to face the correct direction...")
+    await ctx.send(line("bets_closed"))
 
     await asyncio.sleep(2)
     await ctx.send("3...")
@@ -1226,21 +1168,32 @@ async def horserace(ctx):
         winners = []
         for bet in winning_bets:
             new_total = add_carrot(bet["user_id"], bet["name"])
-            winners.append(f"{bet['name']} (+1 carrot, now {new_total})")
-
-        winners_text = ", ".join(winners)
+            name = discord.utils.escape_markdown(bet["name"])
+            winners.append(f"{name} (+1 carrot, now {new_total})")
 
         await ctx.send(
             f"🏆 **#{winning_number} {winning_horse}** {dramatic_finish}\n\n"
-            f"Correct bets: **{winners_text}**\n\n"
             "🥕 The winners receive 1 carrot and eternal pasture bragging rights."
         )
+        for page in winner_pages(winners):
+            await ctx.send(
+                f"**Correct bets:**\n{page}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
     else:
         await ctx.send(
             f"🏆 **#{winning_number} {winning_horse}** {dramatic_finish}\n\n"
             "Nobody bet on the winner.\n\n"
-            "🐴 The horse celebrates alone, which is honestly very powerful."
+            f"{line('race_no_winners')}"
         )
+
+
+@horserace.error
+async def horserace_error(ctx, error):
+    if isinstance(error, commands.MaxConcurrencyReached):
+        await ctx.send("🏇 A race is already running in this channel. Wait until it finishes before starting another.")
+    else:
+        raise error
 
 
 @bot.command()
@@ -1250,6 +1203,7 @@ async def horsejack(ctx):
 
     await ctx.send(
         "🃏🐴 **Horsejack!**\n\n"
+        f"{line('horsejack_intro')}\n\n"
         "Try to get closer to **21** than the dealer horse.\n"
         "Type `hit` to draw another card or `stand` to stop.\n"
         "Win to earn 🥕 **1 carrot**."
@@ -1267,7 +1221,7 @@ async def horsejack(ctx):
 
         if player_total > 21:
             await ctx.send(
-                "💥 You busted! The dealer horse slowly eats your paperwork.\n"
+                f"{line('horsejack_bust')}\n"
                 "No carrot this time."
             )
             return
@@ -1282,14 +1236,14 @@ async def horsejack(ctx):
         try:
             message = await bot.wait_for("message", timeout=30, check=check)
         except asyncio.TimeoutError:
-            await ctx.send("⌛ You waited too long. The dealer horse got bored and wandered away.")
+            await ctx.send(line("horsejack_timeout"))
             return
 
         choice = message.content.lower().strip()
 
         if choice == "hit":
             player_hand.append(draw_card())
-            await ctx.send("🃏 You draw another card. The horse squints judgmentally.")
+            await ctx.send(line("horsejack_hit"))
         else:
             break
 
@@ -1315,19 +1269,19 @@ async def horsejack(ctx):
     if dealer_total > 21:
         new_total = add_carrot(ctx.author.id, ctx.author.display_name)
         await ctx.send(
-            f"🏆 Dealer horse busted! You win 🥕 **1 carrot**.\n"
+            f"{line('horsejack_dealer_bust')}\n"
             f"You now have **{new_total}** carrot(s)."
         )
     elif player_total > dealer_total:
         new_total = add_carrot(ctx.author.id, ctx.author.display_name)
         await ctx.send(
-            f"🏆 You beat the dealer horse and win 🥕 **1 carrot**.\n"
+            f"{line('horsejack_win')}\n"
             f"You now have **{new_total}** carrot(s)."
         )
     elif player_total == dealer_total:
-        await ctx.send("🤝 Push! You tied with the dealer horse. No carrot, but your honor survives.")
+        await ctx.send(line("horsejack_tie"))
     else:
-        await ctx.send("🐴 Dealer horse wins. It looks far too smug. No carrot this time.")
+        await ctx.send(line("horsejack_loss"))
 
 
 @bot.command()
@@ -1386,7 +1340,7 @@ async def forevercd(ctx):
         return
 
     try:
-        save_forever_config(target_channel.id)
+        save_forever_config(ctx.guild.id, target_channel.id)
     except OSError as error:
         await ctx.send(
             f"🐴 I renamed the channel, but could not save the countdown config: `{error}`"
@@ -1462,7 +1416,5 @@ async def trample_error(ctx, error):
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Missing DISCORD_BOT_TOKEN")
-    if CHANNEL_ID == 0:
-        raise RuntimeError("Missing DISCORD_CHANNEL_ID")
 
     bot.run(TOKEN)

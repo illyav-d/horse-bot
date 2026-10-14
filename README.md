@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.7.0**
+Current version: **1.8.2**
 
 ## Features
 
@@ -15,6 +15,27 @@ Current version: **1.7.0**
 - WoW Forever countdown channel
 - FFXIV market-board price checks
 - FFXIV price alerts that run continuously while the bot is hosted
+- WoW retail character cards
+- FFXIV NQ/HQ price trends from recent sales
+- A kitchen horse photo whenever someone says "macaroni horse"
+- Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
+
+## Version 1.8.2
+
+- Say `macaroni horse` anywhere in a message to post the bundled kitchen horse photo. Matching ignores capitalization and accepts extra whitespace. Bot and webhook messages are ignored.
+- Added text variants to horse posts, facts, carrot replies, race betting announcements, and Horsejack. Each message category avoids repeating its previous line.
+
+## Version 1.8.1
+
+- One active horse race per channel; other channels and servers can race independently.
+- Horse picks are collected continuously, even while Discord is updating the betting board. The board refreshes every two seconds instead of sending a message and reaction for every pick. Each player can change their pick until betting closes.
+- Kept retail character cards and price trends. Removed Classic cards and FF Logs raid recaps for now; no API client IDs or secrets are needed for the remaining commands.
+
+## Version 1.7.1
+
+- Changelogs and daily horses now post in every server, using the first text channel in the server channel list where Horsie can view the channel, send messages, and embed links. If a send fails, Horsie tries the next eligible channel.
+- Daily horses are posted at 09:00 UTC. `DISCORD_CHANNEL_ID` is no longer required or used.
+- WoW Forever countdowns are saved and updated separately for each server.
 
 ## Commands
 
@@ -34,6 +55,46 @@ Current version: **1.7.0**
 | `!xivwatch <world/DC> <price> <item>` | Creates an FFXIV price alert |
 | `!xivwatches` | Lists your active FFXIV price alerts |
 | `!xivunwatch <id>` | Removes an FFXIV price alert |
+| `!wow <region> <realm> <character>` | Retail WoW character card via Raider.IO |
+| `!xivtrend <world/DC> <item> [--hq or --nq]` | Compares recent sale prices and current listings; defaults to NQ |
+| `macaroni horse` (no prefix) | Posts the kitchen horse photo |
+
+## Macaroni Horse
+
+Say `macaroni horse` in chat; for example, `MACARONI HORSE!` or `someone summon macaroni horse`. Horsie posts the photo in the same channel with a random caption. The image is bundled at `assets/macaroni_horse.jpg`, so deployment does not depend on your Downloads folder. Include that asset when committing/deploying. The bot needs **Attach Files** as well as permission to view and send messages in that channel.
+
+## Horse Races
+
+Use `!horserace` to start a race. Only one race can run in a channel at a time, including the betting window and result announcements. Other channels can run their own races.
+
+Send `1`, `2`, `3`, or `4` during the 20-second betting window. Picks from multiple players are recorded independently of Discord sends and edits. Your latest valid number replaces your earlier pick; each player receives at most one reward. Bots, other channels, invalid numbers, and picks after the deadline are ignored.
+
+One betting board shows the number of picks for each horse and refreshes every two seconds when picks change. Per-pick reactions and confirmation messages have been removed to reduce Discord traffic.
+
+## WoW Character Cards
+
+```text
+!wow eu silvermoon CharacterName
+!wow eu "Realm Name" CharacterName
+```
+
+Use region `eu`, `us`, `kr`, or `tw`. Realm slugs work; quote realm names containing spaces.
+
+Retail uses [Raider.IO](https://raider.io/api) and shows equipped item level, current Mythic+ score, raid progression, and a profile link. No API key is required. Classic and WoW Forever character cards are not included.
+
+## FFXIV Price Trends
+
+```text
+!xivtrend Light Yollal Extract
+!xivtrend Omega Dark Matter --nq
+!xivtrend Light Yollal Extract --hq
+```
+
+Uses [Universalis](https://docs.universalis.app/) with no API key. NQ is the default; HQ must be requested explicitly, so different qualities are never mixed. Shows the cheapest returned listing, its difference from the last 24-hour sale median, sales medians for the last 24 hours and preceding 24 hours, observed units sold, and data freshness.
+
+The trend compares sale medians only when both windows contain at least three transactions. Each transaction has equal weight regardless of stack size. Up to 1,000 sales are sampled over 48 hours; busy items may have an incomplete earlier window. These are community-observed sales, not a guaranteed full history or a price forecast.
+
+Game API commands have per-user cooldowns, request timeouts, and helpful errors for unavailable profiles, rate limits, and missing data.
 
 ## FFXIV Market Watcher
 
@@ -93,7 +154,6 @@ The bot reads configuration from environment variables.
 | Variable | Required | Description |
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
-| `DISCORD_CHANNEL_ID` | Yes | Channel used for the scheduled daily horse and changelog |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |
 | `CARROT_FILE` | No | Path to carrot data; default is `carrots.json` |
 | `FOREVER_CONFIG_FILE` | No | Path to WoW countdown config; default is `forever_countdown.json` |
@@ -122,7 +182,6 @@ Set the required variables:
 
 ```powershell
 $env:DISCORD_BOT_TOKEN="YOUR_TOKEN"
-$env:DISCORD_CHANNEL_ID="YOUR_CHANNEL_ID"
 
 python horse_bot.py
 ```
@@ -135,7 +194,6 @@ Recommended Railway variables:
 
 ```text
 DISCORD_BOT_TOKEN=...
-DISCORD_CHANNEL_ID=...
 ```
 
 Start command:
@@ -193,10 +251,19 @@ Run:
 
 The bot asks which text channel should become the countdown.
 
-It renames the selected channel automatically until the configured WoW Forever launch time. Existing countdown channels can be detected again when the bot restarts.
+It renames the selected channel automatically until the configured WoW Forever launch time. Each server can configure its own countdown channel with `!forevercd`. Settings are stored separately per server. Existing countdown channels and the original single-channel configuration are recovered automatically after restarts.
 
 ## Notes
 
 FFXIV market data comes from community services and may not always represent an instantaneous in-game market-board state.
 
-Horsie Bot is an independent hobby project and is not affiliated with Discord, Square Enix, Blizzard Entertainment, Railway, XIVAPI, or Universalis.
+Horsie Bot is an independent hobby project and is not affiliated with Discord, Square Enix, Blizzard Entertainment, Railway, XIVAPI, Universalis, or Raider.IO.
+
+## Tests
+
+```text
+python -m unittest test_game_commands test_race_betting test_horse_reactions
+python test_multiserver.py
+```
+
+Tests mock external services and Discord. They cover quality filtering, sales windows, retail cards, HTTP failures, simultaneous race picks, race concurrency, listener cleanup, macaroni horse uploads and phrase matching, text variation, and the earlier multi-server behavior without posting messages or requiring API credentials.
