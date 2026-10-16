@@ -57,6 +57,30 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
                 await HorseReactions().on_message(message)
                 message.channel.send.assert_awaited_once()
 
+    async def test_rat_video_triggers_upload_bundled_mp4(self):
+        for text in ["!rat", "!RAT!", "show !rat please", "i love rat", "I LOVE RAT!", "yeah i   love rat ❤️"]:
+            with self.subTest(text=text):
+                message = self.message(text)
+
+                async def sent(*args, **kwargs):
+                    self.assertEqual(args, (None,))
+                    self.assertEqual(kwargs["file"].filename, "rat.mp4")
+                    self.assertEqual(kwargs["file"].fp.read(8)[4:], b"ftyp")
+
+                message.channel.send.side_effect = sent
+                await HorseReactions().on_message(message)
+                message.channel.send.assert_awaited_once()
+
+    async def test_rat_video_ignores_partial_matches_bots_and_webhooks(self):
+        for text, bot, webhook in [
+            ("!rattle", False, None), ("i love rats", False, None),
+            ("rat", False, None), ("!rat", True, None),
+            ("i love rat", False, 42),
+        ]:
+            message = self.message(text, bot=bot, webhook=webhook)
+            await HorseReactions().on_message(message)
+            message.channel.send.assert_not_awaited()
+
     async def test_missing_asset_does_not_raise(self):
         message = self.message("macaroni horse")
         with patch("horse_reactions.MACARONI_IMAGE", MACARONI_IMAGE.parent / "missing-test-image.jpg"), patch("builtins.print"):

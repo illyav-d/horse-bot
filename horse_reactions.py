@@ -13,6 +13,8 @@ from bot_text import line
 MACARONI_IMAGE = Path(__file__).resolve().parent / "assets" / "macaroni_horse.jpg"
 MACARONI_PATTERN = re.compile(r"\bmacaroni\s+horse\b", re.IGNORECASE)
 RAT_IMAGE = Path(__file__).resolve().parent / "assets" / "rat_throw.jpg"
+RAT_VIDEO = Path(__file__).resolve().parent / "assets" / "rat.mp4"
+RAT_VIDEO_PATTERN = re.compile(r"(?<!\w)!rat\b|\bi\s+love\s+rat\b", re.IGNORECASE)
 RAT_PATTERN = re.compile(r"\bshut\s*up\s+chelsea\b", re.IGNORECASE)
 
 
@@ -21,7 +23,9 @@ class HorseReactions(commands.Cog):
     async def on_message(self, message):
         if message.author.bot or getattr(message, "webhook_id", None):
             return
-        if RAT_PATTERN.search(message.content):
+        if RAT_VIDEO_PATTERN.search(message.content):
+            image_path, filename, caption = RAT_VIDEO, "rat.mp4", None
+        elif RAT_PATTERN.search(message.content):
             image_path, filename, caption = RAT_IMAGE, "rat_throw.jpg", "take this rat and relax"
         elif MACARONI_PATTERN.search(message.content):
             image_path, filename, caption = MACARONI_IMAGE, "macaroni_horse.jpg", line("macaroni")
