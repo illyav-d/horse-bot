@@ -17,6 +17,7 @@ from horse_articles import HorseArticles
 from game_commands import GameCommands
 from race_betting import collect_race_bets, winner_pages
 from data_storage import data_path, write_json
+from discord_startup import run_bot
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -293,6 +294,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+startup_announced = False
 
 
 def load_carrots():
@@ -856,9 +858,12 @@ async def setup_hook():
 
 @bot.event
 async def on_ready():
+    global startup_announced
     print(f"Logged in as {bot.user}")
-    print_changelog()
-    await post_changelog_to_discord()
+    if not startup_announced:
+        startup_announced = True
+        print_changelog()
+        await post_changelog_to_discord()
 
     if not post_daily_horse.is_running():
         post_daily_horse.start()
@@ -1457,4 +1462,4 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Missing DISCORD_BOT_TOKEN")
 
-    bot.run(TOKEN)
+    run_bot(bot, TOKEN)

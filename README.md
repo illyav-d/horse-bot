@@ -6,6 +6,8 @@ Current version: **1.8.5**
 
 ## Features
 
+Discord login rate limits now wait in-process instead of triggering Railway restart loops. HTTP 429 login failures use a 15-minute cooldown, doubling up to an hour, and respect longer server retry headers. The cooldown is saved on the Railway volume and survives restarts. Invalid tokens stop login attempts until an operator updates the token and restarts the service. Reconnecting does not repost the startup changelog. These safeguards cannot remove an existing Cloudflare restriction or establish its original cause.
+
 - Daily horse post
 - Horse facts
 - Carrot points and leaderboard
