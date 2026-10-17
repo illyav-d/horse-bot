@@ -1,7 +1,7 @@
 """Default Python entry point for hosting platforms."""
 
-import runpy
+from horsie.horse_bot import main
 
 
 if __name__ == "__main__":
-    runpy.run_module("horse_bot", run_name="__main__")
+    main()

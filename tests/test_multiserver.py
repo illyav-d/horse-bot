@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import discord
-import horse_bot as h
+from horsie import horse_bot as h
 
 def channel(i, name="general", allowed=True):
     c = Mock(spec=discord.TextChannel)

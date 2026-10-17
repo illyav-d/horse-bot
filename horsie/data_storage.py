@@ -5,13 +5,21 @@ import os
 import tempfile
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ASSETS_DIR = PROJECT_ROOT / "assets"
+DATA_DIR = PROJECT_ROOT / "data"
 
 def data_path(variable, filename):
     if override := os.getenv(variable):
         return Path(override)
     if mount := os.getenv("RAILWAY_VOLUME_MOUNT_PATH"):
         return Path(mount) / filename
-    return Path(filename)
+    # Keep existing local saves readable until the stopped bot's files have
+    # been moved into data/. Never replace a live save with an empty one.
+    legacy = PROJECT_ROOT / filename
+    if legacy.exists() and not (DATA_DIR / filename).exists():
+        return legacy
+    return DATA_DIR / filename
 
 
 def write_json(path, data):

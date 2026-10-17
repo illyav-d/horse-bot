@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import discord
 
-from discord_startup import connect_with_backoff, retry_delay
+from horsie.discord_startup import connect_with_backoff, retry_delay
 
 
 def limited(headers=None, body="<html>Cloudflare 1015</html>"):
@@ -27,8 +27,8 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
             async def sleep(seconds):
                 clock[0] += seconds
 
-            with patch("discord_startup.time.time", side_effect=lambda: clock[0]), patch(
-                "discord_startup.asyncio.sleep", side_effect=sleep
+            with patch("horsie.discord_startup.time.time", side_effect=lambda: clock[0]), patch(
+                "horsie.discord_startup.asyncio.sleep", side_effect=sleep
             ) as wait:
                 await connect_with_backoff(client, "test-token", path)
                 self.assertEqual([call.args[0] for call in wait.await_args_list], [900, 1800])
@@ -65,7 +65,7 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retry_delay(limited({"Retry-After": "7200"}), 1), 7200)
         self.assertEqual(retry_delay(limited(body='{"retry_after": 5400}'), 1), 5400)
         self.assertEqual(retry_delay(limited({"Retry-After": "invalid"}), 1), 900)
-        with patch("discord_startup.time.time", return_value=0):
+        with patch("horsie.discord_startup.time.time", return_value=0):
             self.assertEqual(retry_delay(limited({"Retry-After": "Thu, 01 Jan 1970 02:00:00 GMT"}), 1), 7200)
 
 

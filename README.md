@@ -4,9 +4,24 @@ A small Discord bot with horse-themed commands, games, a WoW Forever countdown, 
 
 Current version: **1.8.5**
 
-## Features
+## Project Layout
+
+- `horsie/`: bot code and Discord features.
+- `tests/`: offline tests.
+- `assets/`: images, GIFs, and videos.
+- `data/`: local saves and login cooldown state, excluded from Git.
+- `docs/`: supporting documentation and horse fact sources.
+- `scripts/`: local PowerShell launcher with your private configuration.
+
+Run `python main.py` or `python -m horsie` from the project folder. The existing `./StartHorseBot.ps1` shortcut and `StartHorsie.bat` still work. Local saves and bundled assets resolve from the project directory even when the launcher is called from another folder. Railway continues using its attached volume for saves.
+
+Older local saves in the project root remain readable until moved into `data/`. Stop the bot before moving save files so a running process cannot write to the old location.
+
+## Discord Login Backoff
 
 Discord login rate limits now wait in-process instead of triggering Railway restart loops. HTTP 429 login failures use a 15-minute cooldown, doubling up to an hour, and respect longer server retry headers. The cooldown is saved on the Railway volume and survives restarts. Invalid tokens stop login attempts until an operator updates the token and restarts the service. Reconnecting does not repost the startup changelog. These safeguards cannot remove an existing Cloudflare restriction or establish its original cause.
+
+## Features
 
 - Daily horse post
 - Horse facts
@@ -33,7 +48,7 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 
 - Horsie read a book. More horse facts.
 - Added 30 facts about whiskers, colours, movement, ponies, and horse behaviour. Tidied up a few duplicate or questionable older claims.
-- New fact references are listed in [HORSE_FACT_SOURCES.md](HORSE_FACT_SOURCES.md). Facts appear in both `!horsefact` and horse posts through the existing shuffled rotation.
+- New fact references are listed in [HORSE_FACT_SOURCES.md](docs/HORSE_FACT_SOURCES.md). Facts appear in both `!horsefact` and horse posts through the existing shuffled rotation.
 
 ## Version 1.8.3
 
@@ -181,10 +196,10 @@ The bot reads configuration from environment variables.
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |
-| `CARROT_FILE` | No | Path to carrot data; defaults to `carrots.json` on the attached Railway volume, or locally when no volume is attached |
-| `FOREVER_CONFIG_FILE` | No | Path to WoW countdown config; default is `forever_countdown.json` |
-| `XIV_WATCH_FILE` | No | Path to FFXIV market watches; default is `xiv_watches.json` |
-| `HORSE_ARTICLE_FILE` | No | Path to per-server shared article history; defaults to `horse_articles.json` on the attached Railway volume, or locally when no volume is attached |
+| `CARROT_FILE` | No | Path to carrot data; defaults to `carrots.json` on the Railway volume, or `data/carrots.json` locally |
+| `FOREVER_CONFIG_FILE` | No | Path to WoW countdown config; defaults to `forever_countdown.json` on the Railway volume, or `data/forever_countdown.json` locally |
+| `XIV_WATCH_FILE` | No | Path to FFXIV market watches; defaults to `xiv_watches.json` on the Railway volume, or `data/xiv_watches.json` locally |
+| `HORSE_ARTICLE_FILE` | No | Path to shared article history; defaults to `horse_articles.json` on the Railway volume, or `data/horse_articles.json` locally |
 
 Never commit your Discord bot token to GitHub.
 
@@ -210,7 +225,7 @@ Set the required variables:
 ```powershell
 $env:DISCORD_BOT_TOKEN="YOUR_TOKEN"
 
-python horse_bot.py
+python main.py
 ```
 
 ## Railway Deployment
@@ -226,7 +241,7 @@ DISCORD_BOT_TOKEN=...
 Start command:
 
 ```text
-python horse_bot.py
+python main.py
 ```
 
 If the Railway service is connected to GitHub, pushing a commit normally triggers a new deployment automatically.
@@ -243,7 +258,7 @@ The bot currently stores carrots, countdown configuration, and FFXIV watches in 
 
 Containers can be replaced during deployments, so use a Railway Volume if you want this data to survive redeployments.
 
-Carrot balances and article history automatically use `RAILWAY_VOLUME_MOUNT_PATH` when a volume is attached. Explicit `CARROT_FILE` and `HORSE_ARTICLE_FILE` settings take priority. Carrot scores are runtime data excluded from Git; deployments no longer ship old balances. Saves are written to a temporary file and replaced atomically, and invalid carrot data raises an error rather than silently discarding scores.
+All saves and login cooldown state automatically use `RAILWAY_VOLUME_MOUNT_PATH` when a volume is attached, or the project's `data/` folder locally. Explicit file path variables take priority. Runtime saves are excluded from Git; deployments do not ship old balances or local countdown settings. Saves are written to a temporary file and replaced atomically, and invalid carrot data raises an error rather than silently discarding scores.
 
 When moving an existing bot to a volume, back up its live `carrots.json` and `horse_articles.json` and upload them to the volume before deploying. A new empty save starts with zero carrots; attaching a volume cannot recover previously lost wins automatically.
 
@@ -294,8 +309,7 @@ Horsie Bot is an independent hobby project and is not affiliated with Discord, S
 ## Tests
 
 ```text
-python -m unittest test_game_commands test_race_betting test_horse_reactions test_horse_articles test_horse_web test_carrot_storage
-python test_multiserver.py
+python -m unittest discover -s tests -t .
 ```
 
 Tests mock external services and Discord. They cover quality filtering, sales windows, retail cards, HTTP failures, simultaneous race picks, race concurrency, listener cleanup, macaroni horse uploads and phrase matching, text variation, and the earlier multi-server behavior without posting messages or requiring API credentials.

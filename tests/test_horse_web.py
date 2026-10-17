@@ -2,9 +2,9 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import horse_articles as articles
-from horse_web import ArchiveLinks, fetch_html, normalize_url, parse_page
-from test_horse_articles import NOW, story
+from horsie import horse_articles as articles
+from horsie.horse_web import ArchiveLinks, fetch_html, normalize_url, parse_page
+from tests.test_horse_articles import NOW, story
 
 
 URL = "https://www.horsenation.com/2026/10/14/cute-pony"

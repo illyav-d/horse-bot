@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 import discord
 
-from bot_text import line
-from horse_reactions import HorseReactions, MACARONI_IMAGE
+from horsie.bot_text import line
+from horsie.horse_reactions import HorseReactions, MACARONI_IMAGE
 
 
 class ReactionTests(unittest.IsolatedAsyncioTestCase):
@@ -83,7 +83,7 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_asset_does_not_raise(self):
         message = self.message("macaroni horse")
-        with patch("horse_reactions.MACARONI_IMAGE", MACARONI_IMAGE.parent / "missing-test-image.jpg"), patch("builtins.print"):
+        with patch("horsie.horse_reactions.MACARONI_IMAGE", MACARONI_IMAGE.parent / "missing-test-image.jpg"), patch("builtins.print"):
             await HorseReactions().on_message(message)
         message.channel.send.assert_not_awaited()
 
@@ -95,7 +95,7 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
         message.channel.send.assert_awaited_once()
 
     async def test_listener_registered_without_replacing_command_handler(self):
-        import horse_bot
+        from horsie import horse_bot
         from discord.ext import commands
         bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
         async with bot:
@@ -104,6 +104,12 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(bot.extra_events.get("on_message"))
             self.assertIn("process_commands", bot.on_message.__func__.__code__.co_names)
             self.assertIsNotNone(bot.get_command("horsearticle"))
+            rat = bot.get_command("rat")
+            self.assertIsNotNone(rat)
+            message = self.message("!rat")
+            await bot.get_cog("HorseReactions").on_message(message)
+            await rat.callback(rat.cog, SimpleNamespace(channel=message.channel))
+            message.channel.send.assert_awaited_once()
 
 
 class TextTests(unittest.TestCase):

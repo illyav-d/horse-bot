@@ -13,8 +13,8 @@ from xml.etree import ElementTree
 import aiohttp
 import discord
 from discord.ext import commands
-from data_storage import data_path, write_json
-from horse_web import ArchiveLinks, SOURCES, fetch_html, normalize_url, parse_page
+from horsie.data_storage import data_path, write_json
+from horsie.horse_web import ArchiveLinks, SOURCES, fetch_html, normalize_url, parse_page
 
 
 FEEDS = (

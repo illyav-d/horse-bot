@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, Mock, patch
 import discord
 from discord.ext import commands
 
-import horse_bot
-from race_betting import RaceBets, collect_race_bets, winner_pages
+from horsie import horse_bot
+from horsie.race_betting import RaceBets, collect_race_bets, winner_pages
 
 
 HORSES = ["Horse A", "Horse B", "Horse C", "Horse D"]
@@ -173,7 +173,7 @@ class RaceTests(unittest.IsolatedAsyncioTestCase):
         await guard.release(one)
 
     async def test_removed_commands_not_registered(self):
-        from game_commands import GameCommands
+        from horsie.game_commands import GameCommands
         bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
         async with bot:
             await bot.add_cog(GameCommands(bot, AsyncMock()))

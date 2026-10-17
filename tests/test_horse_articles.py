@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import horse_articles as articles
+from horsie import horse_articles as articles
 
 
 NOW = datetime(2026, 10, 14, 12, tzinfo=timezone.utc)

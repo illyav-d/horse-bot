@@ -8,3 +8,6 @@ __pycache__/
 carrots.json
 horse_articles.json
 discord_login_state.json
+scripts/StartHorseBot.ps1
+data/*
+!data/.gitkeep

@@ -1,0 +1,1 @@
+"""Horsie Discord bot."""

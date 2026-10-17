@@ -2,23 +2,31 @@
 
 import re
 from contextlib import closing
-from pathlib import Path
 
 import discord
 from discord.ext import commands
 
-from bot_text import line
+from horsie.bot_text import line
+from horsie.data_storage import ASSETS_DIR
 
 
-MACARONI_IMAGE = Path(__file__).resolve().parent / "assets" / "macaroni_horse.jpg"
+MACARONI_IMAGE = ASSETS_DIR / "macaroni_horse.jpg"
 MACARONI_PATTERN = re.compile(r"\bmacaroni\s+horse\b", re.IGNORECASE)
-RAT_IMAGE = Path(__file__).resolve().parent / "assets" / "rat_throw.jpg"
-RAT_VIDEO = Path(__file__).resolve().parent / "assets" / "rat.mp4"
+RAT_IMAGE = ASSETS_DIR / "rat_throw.jpg"
+RAT_VIDEO = ASSETS_DIR / "rat.mp4"
 RAT_VIDEO_PATTERN = re.compile(r"(?<!\w)!rat\b|\bi\s+love\s+rat\b", re.IGNORECASE)
 RAT_PATTERN = re.compile(r"\bshut\s*up\s+chelsea\b", re.IGNORECASE)
 
 
 class HorseReactions(commands.Cog):
+    @commands.command(name="rat")
+    async def rat(self, ctx):
+        """Post the rat video (sent by the shared message listener)."""
+        # The listener also supports phrases and embedded !rat triggers.
+        # Register the command so normal !rat use is recognized without
+        # uploading a second copy of the video.
+        pass
+
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot or getattr(message, "webhook_id", None):

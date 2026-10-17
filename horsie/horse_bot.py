@@ -5,19 +5,18 @@ import json
 import re
 import uuid
 from contextlib import closing
-from pathlib import Path
 from urllib.parse import quote
 import aiohttp
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, time, timezone
-from bot_text import line
-from horse_reactions import HorseReactions
-from horse_articles import HorseArticles
-from game_commands import GameCommands
-from race_betting import collect_race_bets, winner_pages
-from data_storage import data_path, write_json
-from discord_startup import run_bot
+from horsie.bot_text import line
+from horsie.horse_reactions import HorseReactions
+from horsie.horse_articles import HorseArticles
+from horsie.game_commands import GameCommands
+from horsie.race_betting import collect_race_bets, winner_pages
+from horsie.data_storage import ASSETS_DIR, data_path, write_json
+from horsie.discord_startup import run_bot
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -31,10 +30,10 @@ CARROT_FILE = data_path("CARROT_FILE", "carrots.json")
 
 # Local save file for the WoW Forever countdown channel.
 # This lets the countdown resume automatically after a bot restart.
-FOREVER_CONFIG_FILE = Path(os.getenv("FOREVER_CONFIG_FILE", "forever_countdown.json"))
+FOREVER_CONFIG_FILE = data_path("FOREVER_CONFIG_FILE", "forever_countdown.json")
 
 # Local save file for FFXIV Universalis market watches.
-XIV_WATCH_FILE = Path(os.getenv("XIV_WATCH_FILE", "xiv_watches.json"))
+XIV_WATCH_FILE = data_path("XIV_WATCH_FILE", "xiv_watches.json")
 
 # WoW Forever launch: 5 November 2026 at 00:00 Belgian time (CET).
 # Stored as UTC to keep the countdown timezone-safe.
@@ -619,7 +618,7 @@ async def post_changelog_to_discord():
         if channel.permissions_for(channel.guild.me).attach_files:
             embed.set_thumbnail(url="attachment://changelog_rat.gif")
             with closing(discord.File(
-                Path(__file__).parent / "assets" / "changelog_rat.gif",
+                ASSETS_DIR / "changelog_rat.gif",
                 filename="changelog_rat.gif",
             )) as rat:
                 await channel.send(embed=embed, file=rat)
@@ -1458,8 +1457,12 @@ async def trample_error(ctx, error):
         raise error
 
 
-if __name__ == "__main__":
+def main():
     if not TOKEN:
         raise RuntimeError("Missing DISCORD_BOT_TOKEN")
 
     run_bot(bot, TOKEN)
+
+
+if __name__ == "__main__":
+    main()

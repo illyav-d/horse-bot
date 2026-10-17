@@ -9,7 +9,7 @@ from email.utils import parsedate_to_datetime
 
 import discord
 
-from data_storage import data_path, write_json
+from horsie.data_storage import data_path, write_json
 
 log = logging.getLogger(__name__)
 

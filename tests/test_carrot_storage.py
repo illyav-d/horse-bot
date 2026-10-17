@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import horse_bot as bot
-from data_storage import data_path
+from horsie import horse_bot as bot
+from horsie.data_storage import data_path
 
 
 class CarrotStorageTests(unittest.TestCase):

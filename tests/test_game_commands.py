@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from discord.ext import commands
 
-import game_commands as g
+from horsie import game_commands as g
 
 
 class Context:
