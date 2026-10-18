@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import unittest
 from types import SimpleNamespace as NS
@@ -6,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
-from horsie.reality_check import CAUTION, CheckError, RealityCheck, assess, image_urls
+from horsie.reality_check import CAUTION, CheckError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver
 
 
 def message(content="", attachments=None, embeds=None, id=100):
@@ -34,7 +35,7 @@ def history(channel, messages):
 class RealityTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cog = RealityCheck(NS(user=NS(id=42)))
-        self.env = patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"})
+        self.env = patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"})
         self.env.start()
         self.addCleanup(self.env.stop)
 
@@ -86,10 +87,10 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
             await self.cog.on_message(request)
             self.assertIn("couldn't find", request.reply.await_args.args[0])
             self.assertFalse(self.cog.active_channels)
-            with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
                 request.author.id = 8
                 await self.cog.on_message(request)
-            self.assertIn("OPENAI_API_KEY", request.reply.await_args.args[0])
+            self.assertIn("GEMINI_API_KEY", request.reply.await_args.args[0])
             check.assert_not_awaited()
 
     async def test_cooldown_and_failure_release_busy_channel(self):
@@ -143,23 +144,102 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), patch("horsie.reality_check.aiohttp.ClientSession", factory):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "REALITY_CHECK_MODEL": "gemini-2.5-flash"}), \
+                patch("horsie.reality_check.aiohttp.ClientSession", factory), \
+                patch("horsie.reality_check.aiohttp.TCPConnector"), \
+                patch("horsie.reality_check.download_image", AsyncMock(return_value=("image/png", b"image bytes"))):
             answer = await assess("image", ["https://example.com/image.png"])
+        self.assertEqual(session.post.call_args.args[0], "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent")
+        self.assertEqual(session.post.call_args.kwargs["headers"], {"x-goog-api-key": "test-key"})
+        self.assertFalse(session.post.call_args.kwargs["allow_redirects"])
         return answer, session.post.call_args.kwargs["json"]
 
     async def test_request_and_visible_uncertainty(self):
-        body = {"status": "completed", "output": [{"type": "message", "content": [{
-            "type": "output_text", "text": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
-        }]}]}
+        body = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{
+            "text": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
+        }]}}]}
         answer, payload = await self.call_api(body=body)
         self.assertIn(CAUTION, answer)
         self.assertIn("Inconclusive", answer)
-        self.assertFalse(payload["store"])
-        self.assertEqual(payload["input"][0]["content"][1]["type"], "input_image")
+        inline = payload["contents"][0]["parts"][1]["inlineData"]
+        self.assertEqual(inline["mimeType"], "image/png")
+        self.assertEqual(base64.b64decode(inline["data"]), b"image bytes")
+        self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
 
     async def test_api_failures_and_bad_or_incomplete_responses(self):
         for status, body in [(429, {}), (401, {}), (500, {}), (200, {}),
-                             (200, {"status": "incomplete"}),
-                             (200, {"status": "completed", "output": []})]:
+                             (200, {"candidates": []}),
+                             (200, {"candidates": [{"finishReason": "MAX_TOKENS"}]}),
+                             (200, {"candidates": [{"finishReason": "SAFETY"}]}),
+                             (200, {"candidates": [{"finishReason": "STOP", "content": {"parts": []}}]})]:
             with self.subTest(status=status, body=body), self.assertRaises(CheckError):
                 await self.call_api(status, body)
+
+    async def test_combined_size_limit_prevents_api_request(self):
+        with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gemini-2.5-flash"}), \
+                patch("horsie.reality_check.MAX_TOTAL_IMAGE_BYTES", 2), \
+                patch("horsie.reality_check.download_image", AsyncMock(return_value=("image/png", b"large"))), \
+                self.assertRaisesRegex(CheckError, "too large together"):
+            await assess("image", ["https://example.com/image.png"])
+
+    async def test_old_model_override_has_clear_error(self):
+        with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gpt-4.1-mini"}), \
+                self.assertRaisesRegex(CheckError, "REALITY_CHECK_MODEL"):
+            await assess("image", ["https://example.com/image.png"])
+
+
+class DownloadTests(unittest.IsolatedAsyncioTestCase):
+    def response(self, data=b"\x89PNG\r\n\x1a\nimage", status=200, headers=None, length=None):
+        async def chunks(_):
+            yield data
+        return NS(status=status, headers=headers or {}, content_length=length,
+                  content=NS(iter_chunked=chunks))
+
+    def session(self, *responses):
+        session = MagicMock()
+        contexts = []
+        for response in responses:
+            context = MagicMock()
+            context.__aenter__ = AsyncMock(return_value=response)
+            context.__aexit__ = AsyncMock(return_value=False)
+            contexts.append(context)
+        session.get.side_effect = contexts
+        return session
+
+    async def test_image_signatures_and_no_key_forwarded_to_image_host(self):
+        for data, mime in [(b"\x89PNG\r\n\x1a\nimage", "image/png"),
+                           (b"\xff\xd8\xffimage", "image/jpeg"),
+                           (b"RIFF1234WEBPimage", "image/webp")]:
+            session = self.session(self.response(data))
+            self.assertEqual(await download_image(session, "https://example.com/a.png"), (mime, data))
+            self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
+            self.assertNotIn("headers", session.get.call_args.kwargs)
+
+    async def test_private_links_and_redirects_are_rejected_before_fetch(self):
+        for url in ["http://example.com/a.png", "https://127.0.0.1/a.png",
+                    "https://169.254.169.254/a.png", "https://[::1]/a.png",
+                    "https://user:password@example.com/a.png", "https://example.com:8443/a.png"]:
+            with self.subTest(url=url), self.assertRaises(CheckError):
+                validate_image_url(url)
+        session = self.session(self.response(status=302, headers={"Location": "https://127.0.0.1/a.png"}))
+        with self.assertRaises(CheckError):
+            await download_image(session, "https://example.com/a.png")
+        session.get.assert_called_once()
+
+    async def test_dns_private_addresses_are_rejected(self):
+        resolver = PublicImageResolver()
+        try:
+            with patch("aiohttp.resolver.ThreadedResolver.resolve", AsyncMock(return_value=[{"host": "10.0.0.1"}])), \
+                    self.assertRaises(CheckError):
+                await resolver.resolve("internal.example", 443)
+        finally:
+            await resolver.close()
+
+    async def test_external_redirect_and_size_and_invalid_content(self):
+        session = self.session(self.response(status=302, headers={"Location": "/new.png"}), self.response())
+        self.assertEqual((await download_image(session, "https://example.com/a.png"))[0], "image/png")
+        self.assertEqual(session.get.call_args.args[0], "https://example.com/new.png")
+        for response in [self.response(status=404), self.response(b"<html>"),
+                         self.response(length=9 * 1024 * 1024), self.response(b"x" * (8 * 1024 * 1024 + 1))]:
+            with self.assertRaises(CheckError):
+                await download_image(self.session(response), "https://example.com/a.png")
