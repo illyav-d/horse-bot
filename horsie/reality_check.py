@@ -28,7 +28,7 @@ IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 MAX_LINK_PAGE_BYTES = 256 * 1024
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024  # Leaves room under Gemini's 20 MB inline request limit.
+MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024  # Leaves room for base64 encoding under the request limit.
 CAUTION = "This is an AI assessment, not proof of origin."
 GIF_CAUTION = "GIF assessment uses sampled frames, not the full animation."
 INSTRUCTIONS = """You are Horsie, assessing whether supplied content may be AI-generated.
@@ -58,8 +58,8 @@ class QuotaError(CheckError):
     def __init__(self, seconds=60, daily=False):
         self.seconds = seconds
         self.daily = daily
-        text = ("Google's daily Gemini usage limit has been reached. Checks can resume after Google's daily quota reset."
-                if daily else f"Google is rate-limiting my Gemini image checks (usage limit). Please wait about {seconds} seconds before trying again.")
+        text = ("Groq's daily usage limit has been reached. Checks can resume after Groq's daily quota reset."
+                if daily else f"Groq is rate-limiting my image checks (usage limit). Please wait about {seconds} seconds before trying again.")
         super().__init__(text)
 
 
@@ -238,10 +238,10 @@ async def download_image(session, url):
 
 
 def inline_image(mime, data):
-    return {"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode("ascii")}}
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64," + base64.b64encode(data).decode("ascii")}}
 
 
-def gif_parts(data):
+def gif_parts(data, max_samples=3):
     """Decode bounded GIFs off the event loop and sample across frame order."""
     try:
         with Image.open(io.BytesIO(data), formats=("GIF",)) as image:
@@ -258,7 +258,8 @@ def gif_parts(data):
                 count += 1
                 if count > 200 or count * pixels > 100_000_000:
                     raise CheckError("That GIF is too long or large to check. Please send a shorter GIF or a screenshot.")
-            indices = sorted({round(i * (count - 1) / 3) for i in range(4)})
+            indices = (sorted({round(i * (count - 1) / (max_samples - 1)) for i in range(max_samples)})
+                       if max_samples > 1 else [count // 2])
             parts = []
             for index in indices:
                 image.seek(index)
@@ -269,7 +270,7 @@ def gif_parts(data):
                 output = io.BytesIO()
                 background.save(output, format="JPEG", quality=90)
                 parts.extend([
-                    {"text": f"GIF sampled frame {index + 1} of {count}; only sampled frames are available."},
+                    {"type": "text", "text": f"GIF sampled frame {index + 1} of {count}; only sampled frames are available."},
                     inline_image("image/jpeg", output.getvalue()),
                 ])
             return parts
@@ -278,55 +279,61 @@ def gif_parts(data):
 
 
 async def assess(text, images):
-    model = os.getenv("REALITY_CHECK_MODEL", "gemini-3.8-flash").strip()
-    if not re.fullmatch(r"gemini-[a-zA-Z0-9.-]+", model):
-        raise CheckError("An admin needs to set REALITY_CHECK_MODEL to a supported Gemini model, or remove it to use the default.")
-    content = [{"text": text[:6000] or "Assess the supplied images."}]
+    model = os.getenv("GROQ_REALITY_CHECK_MODEL", "qwen/qwen3.8-27b").strip()
+    if not re.fullmatch(r"[a-zA-Z0-9.-]+/[a-zA-Z0-9.-]+", model):
+        raise CheckError("An admin needs to set GROQ_REALITY_CHECK_MODEL to a supported Groq model, or remove it to use the default.")
+    if not 1 <= len(images) <= 3:
+        raise CheckError("Please check between one and three images at a time.")
+    content = [{"type": "text", "text": text[:6000] or "Assess the supplied images."}]
+    remaining_images = 3
     has_gif = False
     connector = aiohttp.TCPConnector(resolver=PublicImageResolver())
     async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar(),
                                      timeout=aiohttp.ClientTimeout(total=15)) as downloads:
         total_bytes = 0
-        for url in images:
+        for position, url in enumerate(images):
             mime, data = await download_image(downloads, url)
             total_bytes += len(data)
             if total_bytes > MAX_TOTAL_IMAGE_BYTES:
                 raise CheckError("Those images are too large together. Please check one image at a time.")
             if mime == "image/gif":
                 has_gif = True
-                content.extend(await asyncio.to_thread(gif_parts, data))
+                budget = remaining_images - (len(images) - position - 1)
+                parts = await asyncio.to_thread(gif_parts, data, budget)
+                content.extend(parts)
+                remaining_images -= sum(part.get("type") == "image_url" for part in parts)
             else:
                 content.append(inline_image(mime, data))
+                remaining_images -= 1
     if len(json.dumps(content)) > 18_000_000:
         raise CheckError("Those images are too large together. Please check one image at a time.")
     payload = {
-        "systemInstruction": {"parts": [{"text": INSTRUCTIONS}]},
-        "contents": [{"role": "user", "parts": content}],
-        "generationConfig": {
-            "maxOutputTokens": 2048,
-            "thinkingConfig": ({"thinkingBudget": 0} if model.startswith("gemini-2.5-")
-                               else {"thinkingLevel": "low"}),
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
+        "model": model,
+        "messages": [
+            {"role": "system", "content": INSTRUCTIONS},
+            {"role": "user", "content": content},
+        ],
+        "max_completion_tokens": 450,
+        "reasoning_effort": "none",
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "reality_check", "strict": True,
+            "schema": {
+                "type": "object", "additionalProperties": False,
                 "properties": {
-                    "verdict": {"type": "STRING", "enum": list(VERDICTS)},
-                    "reasons": {"type": "STRING"},
+                    "verdict": {"type": "string", "enum": list(VERDICTS)},
+                    "reasons": {"type": "string"},
                 },
                 "required": ["verdict", "reasons"],
             },
-        },
+        }},
     }
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=18)) as session:
-        result = await request_gemini(session, model, payload)
+        result = await request_groq(session, model, payload)
     try:
-        candidate = result["candidates"][0]
-        if candidate.get("finishReason") != "STOP":
+        candidate = result["choices"][0]
+        if candidate.get("finish_reason") != "stop":
             raise ValueError("Incomplete assessment")
-        raw = "".join(
-            part["text"] for part in candidate["content"]["parts"]
-            if "text" in part and not part.get("thought")
-        )
+        raw = candidate["message"]["content"]
         assessment = json.loads(raw)
         verdict, reasons = assessment["verdict"], assessment["reasons"]
         if verdict not in VERDICTS or not isinstance(reasons, str) or not reasons.strip():
@@ -337,14 +344,14 @@ async def assess(text, images):
     return f"**{verdict}**\n{discord.utils.escape_markdown(reasons[:1000])}\n\n{CAUTION}{gif_note}"
 
 
-async def request_gemini(session, model, payload):
+async def request_groq(session, model, payload):
     # The same images/payload are reused; downloads and Discord replies happen once.
     async with asyncio.timeout(40):
         for attempt in range(3):
             try:
                 async with session.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    json=payload, headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"].strip()},
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    json=payload, headers={"Authorization": "Bearer " + os.environ["GROQ_API_KEY"].strip()},
                     allow_redirects=False,
                 ) as response:
                     if response.status == 200:
@@ -354,47 +361,45 @@ async def request_gemini(session, model, payload):
                     except (aiohttp.ClientError, ValueError):
                         error_body = {}
                     # Never log credentials, images, or raw API errors.
-                    print(f"Gemini image check failed: HTTP {response.status}, model={model}, attempt={attempt + 1}/3", flush=True)
+                    print(f"Groq image check failed: HTTP {response.status}, model={model}, attempt={attempt + 1}/3", flush=True)
                     if response.status not in (408, 500, 502, 503, 504):
-                        raise gemini_error(response.status, error_body, getattr(response, "headers", {}).get("Retry-After"))
+                        raise groq_error(response.status, error_body, getattr(response, "headers", {}).get("Retry-After"))
                     if attempt == 2:
-                        raise CheckError("Gemini is still temporarily unavailable after three attempts. Please try again in a minute.")
+                        raise CheckError("Groq is still temporarily unavailable after three attempts. Please try again in a minute.")
             except (asyncio.TimeoutError, aiohttp.ClientConnectionError) as error:
-                print(f"Gemini connection failed: model={model}, attempt={attempt + 1}/3", flush=True)
+                print(f"Groq connection failed: model={model}, attempt={attempt + 1}/3", flush=True)
                 if attempt == 2:
-                    raise CheckError("I couldn't reach Gemini after three attempts. Please try again in a minute.") from error
+                    raise CheckError("I couldn't reach Groq after three attempts. Please try again in a minute.") from error
             await asyncio.sleep(2 ** attempt + random.uniform(0, 0.3))
 
 
-def gemini_error(status, body, retry_after=None):
+def groq_error(status, body, retry_after=None):
     error = body.get("error", {}) if isinstance(body, dict) else {}
     error = error if isinstance(error, dict) else {}
     message = str(error.get("message", "")).lower()
     if "api key" in message or status == 401:
-        return CheckError("Google rejected my Gemini API key. An admin needs to check GEMINI_API_KEY in Railway.")
+        return CheckError("Groq rejected my API key. An admin needs to check GROQ_API_KEY in Railway.")
     if status == 404:
-        return CheckError("Google no longer offers my configured Gemini model to this account. An admin needs to update REALITY_CHECK_MODEL.")
+        return CheckError("Groq does not offer my configured model to this account. An admin needs to update GROQ_REALITY_CHECK_MODEL.")
     if status == 403:
-        return CheckError("Google denied Gemini access. An admin needs to check the API key's project and restrictions.")
+        return CheckError("Groq denied access. An admin needs to check the API key's project and restrictions.")
     if status == 429:
-        details = error.get("details", [])
-        details = details if isinstance(details, list) else []
         delay = str(retry_after or "")
-        metrics = []
-        for item in details:
-            if not isinstance(item, dict):
-                continue
-            delay = str(item.get("retryDelay", delay))
-            for violation in item.get("violations", []):
-                if isinstance(violation, dict):
-                    metrics.extend(str(violation.get(field, "")).lower() for field in ("quotaMetric", "quotaId"))
-        match = re.fullmatch(r"(\d+(?:\.\d+)?)s?", delay)
-        seconds = max(1, math.ceil(float(match[1]))) if match else 60
-        daily = any("perday" in metric or "per_day" in metric for metric in metrics)
+        if not delay:
+            match = re.search(r"try again in ((?:\d+(?:\.\d+)?[hms])+|\d+(?:\.\d+)?)", message)
+            delay = match[1] if match else ""
+        if re.fullmatch(r"\d+(?:\.\d+)?s?", delay):
+            seconds = max(1, math.ceil(float(delay.rstrip("s"))))
+        elif re.fullmatch(r"(?:\d+(?:\.\d+)?[hms])+", delay):
+            seconds = max(1, math.ceil(sum(float(value) * {"h": 3600, "m": 60, "s": 1}[unit]
+                                         for value, unit in re.findall(r"(\d+(?:\.\d+)?)([hms])", delay))))
+        else:
+            seconds = 60
+        daily = any(label in message for label in ("per day", "perday", "per_day", "(tpd)", "(rpd)"))
         return QuotaError(seconds=seconds, daily=daily)
-    if status == 400:
-        return CheckError("Google couldn't accept my Gemini request. An admin needs to check the model and request settings.")
-    return CheckError("Gemini is temporarily unavailable. Please try again later.")
+    if status in (400, 413, 422):
+        return CheckError("Groq couldn't accept my request. An admin needs to check the model and request settings.")
+    return CheckError("Groq is temporarily unavailable. Please try again later.")
 
 
 class RealityCheck(commands.Cog):
@@ -409,7 +414,7 @@ class RealityCheck(commands.Cog):
 
     async def assessment(self, message, images):
         # Select the user's media first. Only an assessment of those exact URLs is reusable.
-        key = (message.guild.id, os.getenv("REALITY_CHECK_MODEL", "gemini-3.8-flash"), tuple(images))
+        key = (message.guild.id, os.getenv("GROQ_REALITY_CHECK_MODEL", "qwen/qwen3.8-27b"), tuple(images))
         async with self.api_lock:
             now = asyncio.get_running_loop().time()
             cached = self.assessments.get(key)
@@ -423,7 +428,7 @@ class RealityCheck(commands.Cog):
             except QuotaError as error:
                 self.blocked_until = asyncio.get_running_loop().time() + error.seconds
                 self.blocked_daily = error.daily
-                print(f"Gemini quota pause: retry_in={error.seconds}s, daily={error.daily}", flush=True)
+                print(f"Groq quota pause: retry_in={error.seconds}s, daily={error.daily}", flush=True)
                 raise
             self.assessments[key] = (asyncio.get_running_loop().time(), answer)
             self.assessments.move_to_end(key)
@@ -458,9 +463,9 @@ class RealityCheck(commands.Cog):
         if self.cooldowns.get_bucket(message).update_rate_limit():
             return
         try:
-            if not os.getenv("GEMINI_API_KEY", "").strip():
+            if not os.getenv("GROQ_API_KEY", "").strip():
                 await message.reply(
-                    "My Gemini checker isn't connected yet. An admin needs to set GEMINI_API_KEY.",
+                    "My Groq checker isn't connected yet. An admin needs to set GROQ_API_KEY.",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return

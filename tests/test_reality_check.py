@@ -10,7 +10,7 @@ import discord
 import aiohttp
 from PIL import Image
 
-from horsie.reality_check import CAUTION, GIF_CAUTION, CheckError, QuotaError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, gemini_error, request_gemini, gif_parts, find_message_images, resolve_image_page
+from horsie.reality_check import CAUTION, GIF_CAUTION, CheckError, QuotaError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, groq_error, request_groq, gif_parts, find_message_images, resolve_image_page
 
 
 def gif_fixture(count=10):
@@ -45,7 +45,7 @@ def history(channel, messages):
 class RealityTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cog = RealityCheck(NS(user=NS(id=42)))
-        self.env = patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"})
+        self.env = patch.dict(os.environ, {"GROQ_API_KEY": "test-key"})
         self.env.start()
         self.addCleanup(self.env.stop)
 
@@ -97,10 +97,10 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
             await self.cog.on_message(request)
             self.assertIn("couldn't find", request.reply.await_args.args[0])
             self.assertFalse(self.cog.active_channels)
-            with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
+            with patch.dict(os.environ, {"GROQ_API_KEY": ""}):
                 request.author.id = 8
                 await self.cog.on_message(request)
-            self.assertIn("GEMINI_API_KEY", request.reply.await_args.args[0])
+            self.assertIn("GROQ_API_KEY", request.reply.await_args.args[0])
             check.assert_not_awaited()
 
     async def test_cooldown_and_failure_release_busy_channel(self):
@@ -195,7 +195,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
-    async def call_api(self, status=200, body=None, model=None, mime="image/png", data=b"image bytes"):
+    async def call_api(self, status=200, body=None, model=None, mime="image/png", data=b"image bytes", images=None):
         response = MagicMock(status=status)
         response.json = AsyncMock(return_value=body)
         session = MagicMock()
@@ -204,78 +204,98 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), \
                 patch("horsie.reality_check.aiohttp.ClientSession", factory), \
                 patch("horsie.reality_check.aiohttp.TCPConnector"), \
                 patch("horsie.reality_check.asyncio.sleep", AsyncMock()), \
                 patch("horsie.reality_check.download_image", AsyncMock(return_value=(mime, data))):
             if model is None:
-                os.environ.pop("REALITY_CHECK_MODEL", None)
+                os.environ.pop("GROQ_REALITY_CHECK_MODEL", None)
             else:
-                os.environ["REALITY_CHECK_MODEL"] = model
-            answer = await assess("image", ["https://example.com/image.png"])
-        expected_model = model or "gemini-3.8-flash"
-        self.assertEqual(session.post.call_args.args[0], f"https://generativelanguage.googleapis.com/v1beta/models/{expected_model}:generateContent")
-        self.assertEqual(session.post.call_args.kwargs["headers"], {"x-goog-api-key": "test-key"})
+                os.environ["GROQ_REALITY_CHECK_MODEL"] = model
+            answer = await assess("image", images or ["https://example.com/image.png"])
+        expected_model = model or "qwen/qwen3.8-27b"
+        self.assertEqual(session.post.call_args.args[0], "https://api.groq.com/openai/v1/chat/completions")
+        self.assertEqual(session.post.call_args.kwargs["json"]["model"], expected_model)
+        self.assertEqual(session.post.call_args.kwargs["headers"], {"Authorization": "Bearer test-key"})
         self.assertFalse(session.post.call_args.kwargs["allow_redirects"])
         return answer, session.post.call_args.kwargs["json"]
 
     async def test_request_and_visible_uncertainty(self):
-        body = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{
-            "text": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
-        }]}}]}
+        body = {"choices": [{"finish_reason": "stop", "message": {
+            "content": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
+        }}]}
         answer, payload = await self.call_api(body=body)
         self.assertIn(CAUTION, answer)
         self.assertIn("Inconclusive", answer)
-        inline = payload["contents"][0]["parts"][1]["inlineData"]
-        self.assertEqual(inline["mimeType"], "image/png")
-        self.assertEqual(base64.b64decode(inline["data"]), b"image bytes")
-        self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
-        self.assertEqual(payload["generationConfig"]["thinkingConfig"], {"thinkingLevel": "low"})
-        self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 2048)
+        inline = payload["messages"][1]["content"][1]["image_url"]["url"]
+        self.assertTrue(inline.startswith("data:image/png;base64,"))
+        self.assertEqual(base64.b64decode(inline.split(",", 1)[1]), b"image bytes")
+        self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+        self.assertEqual(payload["reasoning_effort"], "none")
+        self.assertEqual(payload["max_completion_tokens"], 450)
 
     async def test_api_failures_and_bad_or_incomplete_responses(self):
         for status, body in [(429, {}), (401, {}), (500, {}), (200, {}),
-                             (200, {"candidates": []}),
-                             (200, {"candidates": [{"finishReason": "MAX_TOKENS"}]}),
-                             (200, {"candidates": [{"finishReason": "SAFETY"}]}),
-                             (200, {"candidates": [{"finishReason": "STOP", "content": {"parts": []}}]})]:
+                             (200, {"choices": []}),
+                             (200, {"choices": [{"finish_reason": "length"}]}),
+                             (200, {"choices": [{"finish_reason": "content_filter"}]}),
+                             (200, {"choices": [{"finish_reason": "stop", "message": {"content": ""}}]})]:
             with self.subTest(status=status, body=body), self.assertRaises(CheckError):
                 await self.call_api(status, body)
 
     async def test_gif_submits_sampled_jpegs_and_discloses_sampling(self):
-        body = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{
-            "text": '{"verdict":"Inconclusive","reasons":"Only sampled frames are available."}',
-        }]}}]}
+        body = {"choices": [{"finish_reason": "stop", "message": {
+            "content": '{"verdict":"Inconclusive","reasons":"Only sampled frames are available."}',
+        }}]}
         answer, payload = await self.call_api(body=body, mime="image/gif", data=gif_fixture())
         self.assertIn(GIF_CAUTION, answer)
-        parts = payload["contents"][0]["parts"]
-        images = [part["inlineData"] for part in parts if "inlineData" in part]
-        self.assertEqual(len(images), 4)
-        self.assertTrue(all(part["mimeType"] == "image/jpeg" for part in images))
+        parts = payload["messages"][1]["content"]
+        images = [part["image_url"]["url"] for part in parts if part.get("type") == "image_url"]
+        self.assertEqual(len(images), 3)
+        self.assertTrue(all(part.startswith("data:image/jpeg;base64,") for part in images))
         self.assertIn("frame 10 of 10", parts[-2]["text"])
 
     async def test_combined_size_limit_prevents_api_request(self):
-        with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gemini-3.8-flash"}), \
+        with patch.dict(os.environ, {"GROQ_REALITY_CHECK_MODEL": "qwen/qwen3.8-27b"}), \
                 patch("horsie.reality_check.MAX_TOTAL_IMAGE_BYTES", 2), \
                 patch("horsie.reality_check.download_image", AsyncMock(return_value=("image/png", b"large"))), \
                 self.assertRaisesRegex(CheckError, "too large together"):
             await assess("image", ["https://example.com/image.png"])
 
+    async def test_multiple_gifs_share_the_three_image_budget(self):
+        body = {"choices": [{"finish_reason": "stop", "message": {
+            "content": '{"verdict":"Inconclusive","reasons":"Sampled frames only."}',
+        }}]}
+        for count in (2, 3):
+            with self.subTest(sources=count):
+                _, payload = await self.call_api(body=body, mime="image/gif", data=gif_fixture(),
+                    images=[f"https://example.com/{i}.gif" for i in range(count)])
+                parts = payload["messages"][1]["content"]
+                self.assertEqual(sum(part.get("type") == "image_url" for part in parts), 3)
+
+    async def test_groq_model_setting_ignores_old_provider_override(self):
+        body = {"choices": [{"finish_reason": "stop", "message": {
+            "content": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
+        }}]}
+        with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gemini-3.8-flash"}):
+            _, payload = await self.call_api(body=body)
+        self.assertEqual(payload["model"], "qwen/qwen3.8-27b")
+
     async def test_old_model_override_has_clear_error(self):
-        with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gpt-4.1-mini"}), \
-                self.assertRaisesRegex(CheckError, "REALITY_CHECK_MODEL"):
+        with patch.dict(os.environ, {"GROQ_REALITY_CHECK_MODEL": "gpt-4.1-mini"}), \
+                self.assertRaisesRegex(CheckError, "GROQ_REALITY_CHECK_MODEL"):
             await assess("image", ["https://example.com/image.png"])
 
     def test_actionable_errors_do_not_expose_google_error_body(self):
         for status, body, expected in [
-            (404, {"error": {"message": "Model is no longer available to new users"}}, "REALITY_CHECK_MODEL"),
-            (400, {"error": {"message": "API key not valid: secret-key"}}, "GEMINI_API_KEY"),
+            (404, {"error": {"message": "Model is no longer available to new users"}}, "GROQ_REALITY_CHECK_MODEL"),
+            (400, {"error": {"message": "API key not valid: secret-key"}}, "GROQ_API_KEY"),
             (403, {}, "restrictions"), (429, {}, "usage limit"),
             (400, {}, "request settings"), (503, None, "temporarily unavailable"),
         ]:
             with self.subTest(status=status):
-                result = str(gemini_error(status, body))
+                result = str(groq_error(status, body))
                 self.assertIn(expected, result)
                 self.assertNotIn("secret-key", result)
 
@@ -285,9 +305,9 @@ class GifTests(unittest.TestCase):
         parts = gif_parts(gif_fixture())
         labels = [part["text"] for part in parts if "text" in part]
         self.assertEqual([label.split(" of ")[0] for label in labels],
-                         ["GIF sampled frame 1", "GIF sampled frame 4", "GIF sampled frame 7", "GIF sampled frame 10"])
-        first = Image.open(io.BytesIO(base64.b64decode(parts[1]["inlineData"]["data"])))
-        last = Image.open(io.BytesIO(base64.b64decode(parts[-1]["inlineData"]["data"])))
+                         ["GIF sampled frame 1", "GIF sampled frame 5", "GIF sampled frame 10"])
+        first = Image.open(io.BytesIO(base64.b64decode(parts[1]["image_url"]["url"].split(",", 1)[1])))
+        last = Image.open(io.BytesIO(base64.b64decode(parts[-1]["image_url"]["url"].split(",", 1)[1])))
         self.assertNotEqual(first.getpixel((10, 10)), last.getpixel((10, 10)))
 
     def test_single_frame_gif_is_not_duplicated(self):
@@ -304,19 +324,18 @@ class GifTests(unittest.TestCase):
 
 class QuotaAndCacheTests(unittest.IsolatedAsyncioTestCase):
     def test_retry_delay_and_daily_quota_are_distinguished(self):
-        body = {"error": {"details": [{"retryDelay": "23.4s"}, {"violations": [{
-            "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
-        }]}]}}
-        error = gemini_error(429, body)
+        body = {"error": {"message": "Rate limit reached on tokens per minute (TPM). Please try again in 23.4s."}}
+        error = groq_error(429, body)
         self.assertIsInstance(error, QuotaError)
         self.assertEqual(error.seconds, 24)
         self.assertFalse(error.daily)
         self.assertIn("24 seconds", str(error))
-        body["error"]["details"][1]["violations"][0]["quotaId"] = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
-        self.assertTrue(gemini_error(429, body).daily)
-        self.assertIn("daily quota reset", str(gemini_error(429, body)))
-        self.assertEqual(gemini_error(429, {}, "45").seconds, 45)
-        self.assertEqual(gemini_error(429, {}).seconds, 60)
+        body["error"]["message"] = "Rate limit reached on tokens per day (TPD). Please try again in 1h2m3.4s."
+        self.assertTrue(groq_error(429, body).daily)
+        self.assertEqual(groq_error(429, body).seconds, 3724)
+        self.assertIn("daily quota reset", str(groq_error(429, body)))
+        self.assertEqual(groq_error(429, {}, "45").seconds, 45)
+        self.assertEqual(groq_error(429, {}).seconds, 60)
 
     async def test_repeat_check_uses_cached_answer_but_different_image_does_not(self):
         cog = RealityCheck(NS(user=NS(id=42)))
@@ -380,9 +399,9 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
         return session
 
     async def call(self, session):
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), \
                 patch("horsie.reality_check.asyncio.sleep", AsyncMock()) as sleep:
-            result = await request_gemini(session, "gemini-3.8-flash", {"images": "same payload"})
+            result = await request_groq(session, "qwen/qwen3.8-27b", {"images": "same payload"})
         return result, sleep
 
     async def test_server_failures_recover_without_changing_payload(self):
@@ -425,10 +444,10 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
         session.post.side_effect = None
         session.post.return_value = context
         timeout = asyncio.timeout
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), \
                 patch("horsie.reality_check.asyncio.timeout", side_effect=lambda _: timeout(0.01)), \
                 self.assertRaises(asyncio.TimeoutError):
-            await request_gemini(session, "gemini-3.8-flash", {})
+            await request_groq(session, "qwen/qwen3.8-27b", {})
         self.assertEqual(session.post.call_count, 1)
 
 
