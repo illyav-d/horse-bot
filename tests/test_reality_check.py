@@ -10,7 +10,7 @@ import discord
 import aiohttp
 from PIL import Image
 
-from horsie.reality_check import CAUTION, GIF_CAUTION, CheckError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, gemini_error, request_gemini, gif_parts, find_message_images, resolve_image_page
+from horsie.reality_check import CAUTION, GIF_CAUTION, CheckError, QuotaError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, gemini_error, request_gemini, gif_parts, find_message_images, resolve_image_page
 
 
 def gif_fixture(count=10):
@@ -300,6 +300,67 @@ class GifTests(unittest.TestCase):
             gif_parts(b"GIF89anot-valid")
         with self.assertRaisesRegex(CheckError, "too long"):
             gif_parts(gif_fixture(201))
+
+
+class QuotaAndCacheTests(unittest.IsolatedAsyncioTestCase):
+    def test_retry_delay_and_daily_quota_are_distinguished(self):
+        body = {"error": {"details": [{"retryDelay": "23.4s"}, {"violations": [{
+            "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+        }]}]}}
+        error = gemini_error(429, body)
+        self.assertIsInstance(error, QuotaError)
+        self.assertEqual(error.seconds, 24)
+        self.assertFalse(error.daily)
+        self.assertIn("24 seconds", str(error))
+        body["error"]["details"][1]["violations"][0]["quotaId"] = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+        self.assertTrue(gemini_error(429, body).daily)
+        self.assertIn("daily quota reset", str(gemini_error(429, body)))
+        self.assertEqual(gemini_error(429, {}, "45").seconds, 45)
+        self.assertEqual(gemini_error(429, {}).seconds, 60)
+
+    async def test_repeat_check_uses_cached_answer_but_different_image_does_not(self):
+        cog = RealityCheck(NS(user=NS(id=42)))
+        request = message()
+        with patch("horsie.reality_check.assess", AsyncMock(side_effect=["first assessment", "second assessment"])) as check:
+            self.assertEqual(await cog.assessment(request, ["https://example.com/one.png"]), "first assessment")
+            cached = await cog.assessment(request, ["https://example.com/one.png"])
+            self.assertIn("cached", cached)
+            self.assertIn("first assessment", cached)
+            self.assertEqual(await cog.assessment(request, ["https://example.com/two.png"]), "second assessment")
+        self.assertEqual(check.await_count, 2)
+
+    async def test_global_quota_backoff_stops_other_users_calling_api(self):
+        cog = RealityCheck(NS(user=NS(id=42)))
+        first, second = message(), message()
+        second.author.id = 8
+        with patch("horsie.reality_check.assess", AsyncMock(side_effect=QuotaError(42))) as check:
+            with self.assertRaises(QuotaError):
+                await cog.assessment(first, ["https://example.com/one.png"])
+            with self.assertRaises(QuotaError) as caught:
+                await cog.assessment(second, ["https://example.com/two.png"])
+        self.assertTrue(0 < caught.exception.seconds <= 42)
+        check.assert_awaited_once()
+        self.assertFalse(cog.assessments)
+
+    async def test_cached_assessment_stays_available_during_backoff(self):
+        cog = RealityCheck(NS(user=NS(id=42)))
+        with patch("horsie.reality_check.assess", AsyncMock(return_value="assessment")) as check:
+            await cog.assessment(message(), ["https://example.com/one.png"])
+            cog.blocked_until = asyncio.get_running_loop().time() + 60
+            self.assertIn("cached", await cog.assessment(message(), ["https://example.com/one.png"]))
+        check.assert_awaited_once()
+
+    async def test_expired_results_are_refreshed_and_simultaneous_checks_share_result(self):
+        cog = RealityCheck(NS(user=NS(id=42)))
+        images = ["https://example.com/one.png"]
+        with patch("horsie.reality_check.assess", AsyncMock(return_value="assessment")) as check:
+            results = await asyncio.gather(cog.assessment(message(), images), cog.assessment(message(), images))
+            self.assertEqual(check.await_count, 1)
+            self.assertTrue(any("cached" in result for result in results))
+            key = next(iter(cog.assessments))
+            cog.assessments[key] = (asyncio.get_running_loop().time() - 1801, "old")
+            await cog.assessment(message(), images)
+            self.assertEqual(check.await_count, 2)
 
 
 class RetryTests(unittest.IsolatedAsyncioTestCase):

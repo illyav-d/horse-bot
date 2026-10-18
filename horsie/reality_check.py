@@ -5,9 +5,11 @@ import base64
 import ipaddress
 import io
 import json
+import math
 import os
 import random
 import re
+from collections import OrderedDict
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
@@ -50,6 +52,15 @@ VERDICTS = ("Likely AI-generated", "Likely authentic", "Inconclusive")
 
 class CheckError(Exception):
     """An expected failure with a safe, user-facing explanation."""
+
+
+class QuotaError(CheckError):
+    def __init__(self, seconds=60, daily=False):
+        self.seconds = seconds
+        self.daily = daily
+        text = ("Google's daily Gemini usage limit has been reached. Checks can resume after Google's daily quota reset."
+                if daily else f"Google is rate-limiting my Gemini image checks (usage limit). Please wait about {seconds} seconds before trying again.")
+        super().__init__(text)
 
 
 def message_links(message):
@@ -345,7 +356,7 @@ async def request_gemini(session, model, payload):
                     # Never log credentials, images, or raw API errors.
                     print(f"Gemini image check failed: HTTP {response.status}, model={model}, attempt={attempt + 1}/3", flush=True)
                     if response.status not in (408, 500, 502, 503, 504):
-                        raise gemini_error(response.status, error_body)
+                        raise gemini_error(response.status, error_body, getattr(response, "headers", {}).get("Retry-After"))
                     if attempt == 2:
                         raise CheckError("Gemini is still temporarily unavailable after three attempts. Please try again in a minute.")
             except (asyncio.TimeoutError, aiohttp.ClientConnectionError) as error:
@@ -355,7 +366,7 @@ async def request_gemini(session, model, payload):
             await asyncio.sleep(2 ** attempt + random.uniform(0, 0.3))
 
 
-def gemini_error(status, body):
+def gemini_error(status, body, retry_after=None):
     error = body.get("error", {}) if isinstance(body, dict) else {}
     error = error if isinstance(error, dict) else {}
     message = str(error.get("message", "")).lower()
@@ -366,7 +377,21 @@ def gemini_error(status, body):
     if status == 403:
         return CheckError("Google denied Gemini access. An admin needs to check the API key's project and restrictions.")
     if status == 429:
-        return CheckError("My Gemini checker has reached its usage limit. Please try again later.")
+        details = error.get("details", [])
+        details = details if isinstance(details, list) else []
+        delay = str(retry_after or "")
+        metrics = []
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            delay = str(item.get("retryDelay", delay))
+            for violation in item.get("violations", []):
+                if isinstance(violation, dict):
+                    metrics.extend(str(violation.get(field, "")).lower() for field in ("quotaMetric", "quotaId"))
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)s?", delay)
+        seconds = max(1, math.ceil(float(match[1]))) if match else 60
+        daily = any("perday" in metric or "per_day" in metric for metric in metrics)
+        return QuotaError(seconds=seconds, daily=daily)
     if status == 400:
         return CheckError("Google couldn't accept my Gemini request. An admin needs to check the model and request settings.")
     return CheckError("Gemini is temporarily unavailable. Please try again later.")
@@ -377,6 +402,34 @@ class RealityCheck(commands.Cog):
         self.bot = bot
         self.cooldowns = commands.CooldownMapping.from_cooldown(1, 30, commands.BucketType.user)
         self.active_channels = set()
+        self.api_lock = asyncio.Lock()
+        self.blocked_until = 0
+        self.blocked_daily = False
+        self.assessments = OrderedDict()
+
+    async def assessment(self, message, images):
+        # Select the user's media first. Only an assessment of those exact URLs is reusable.
+        key = (message.guild.id, os.getenv("REALITY_CHECK_MODEL", "gemini-3.8-flash"), tuple(images))
+        async with self.api_lock:
+            now = asyncio.get_running_loop().time()
+            cached = self.assessments.get(key)
+            if cached and now - cached[0] < 1800:
+                self.assessments.move_to_end(key)
+                return "Recent assessment (cached):\n" + cached[1]
+            if now < self.blocked_until:
+                raise QuotaError(math.ceil(self.blocked_until - now), self.blocked_daily)
+            try:
+                answer = await asyncio.wait_for(assess("Assess the supplied image(s) for signs of AI generation.", images), timeout=55)
+            except QuotaError as error:
+                self.blocked_until = asyncio.get_running_loop().time() + error.seconds
+                self.blocked_daily = error.daily
+                print(f"Gemini quota pause: retry_in={error.seconds}s, daily={error.daily}", flush=True)
+                raise
+            self.assessments[key] = (asyncio.get_running_loop().time(), answer)
+            self.assessments.move_to_end(key)
+            while len(self.assessments) > 128:
+                self.assessments.popitem(last=False)
+            return answer
 
     async def target(self, message):
         images = await find_message_images(message)
@@ -421,9 +474,8 @@ class RealityCheck(commands.Cog):
                     target, images = await asyncio.wait_for(self.target(message), timeout=15)
                 except asyncio.TimeoutError as error:
                     raise CheckError("I couldn't finish reading your recent messages and links. Please try again or put the image link in your question.") from error
-                text = "Assess the supplied image(s) for signs of AI generation."
                 async with message.channel.typing():
-                    answer = await asyncio.wait_for(assess(text, images), timeout=55)
+                    answer = await self.assessment(message, images)
                 source = f"Checking: {target.jump_url}\n" if target.id != message.id else ""
                 await message.reply(source + answer, allowed_mentions=discord.AllowedMentions.none())
             finally:
