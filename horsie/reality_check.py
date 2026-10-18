@@ -125,7 +125,7 @@ async def download_image(session, url):
 
 
 async def assess(text, images):
-    model = os.getenv("REALITY_CHECK_MODEL", "gemini-2.5-flash").strip()
+    model = os.getenv("REALITY_CHECK_MODEL", "gemini-3.8-flash").strip()
     if not re.fullmatch(r"gemini-[a-zA-Z0-9.-]+", model):
         raise CheckError("An admin needs to set REALITY_CHECK_MODEL to a supported Gemini model, or remove it to use the default.")
     content = [{"text": text[:6000] or "Assess the supplied images."}]
@@ -143,8 +143,9 @@ async def assess(text, images):
         "systemInstruction": {"parts": [{"text": INSTRUCTIONS}]},
         "contents": [{"role": "user", "parts": content}],
         "generationConfig": {
-            "maxOutputTokens": 450,
-            "thinkingConfig": {"thinkingBudget": 0},
+            "maxOutputTokens": 2048,
+            "thinkingConfig": ({"thinkingBudget": 0} if model.startswith("gemini-2.5-")
+                               else {"thinkingLevel": "low"}),
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "OBJECT",
@@ -162,10 +163,14 @@ async def assess(text, images):
             json=payload, headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"].strip()},
             allow_redirects=False,
         ) as response:
-            if response.status == 429:
-                raise CheckError("My Gemini checker has reached its usage limit. Please try again later.")
             if response.status != 200:
-                raise CheckError("My AI checker is unavailable. An admin may need to check its API configuration.")
+                try:
+                    error_body = await response.json()
+                except (aiohttp.ClientError, ValueError):
+                    error_body = {}
+                # Log only status and the validated model name, never keys or raw API errors.
+                print(f"Gemini image check failed: HTTP {response.status}, model={model}")
+                raise gemini_error(response.status, error_body)
             result = await response.json()
     try:
         candidate = result["candidates"][0]
@@ -182,6 +187,23 @@ async def assess(text, images):
     except (AttributeError, IndexError, KeyError, TypeError, ValueError) as error:
         raise CheckError("I couldn't get a usable assessment. Please try again later.") from error
     return f"**{verdict}**\n{discord.utils.escape_markdown(reasons[:1000])}\n\n{CAUTION}"
+
+
+def gemini_error(status, body):
+    error = body.get("error", {}) if isinstance(body, dict) else {}
+    error = error if isinstance(error, dict) else {}
+    message = str(error.get("message", "")).lower()
+    if "api key" in message or status == 401:
+        return CheckError("Google rejected my Gemini API key. An admin needs to check GEMINI_API_KEY in Railway.")
+    if status == 404:
+        return CheckError("Google no longer offers my configured Gemini model to this account. An admin needs to update REALITY_CHECK_MODEL.")
+    if status == 403:
+        return CheckError("Google denied Gemini access. An admin needs to check the API key's project and restrictions.")
+    if status == 429:
+        return CheckError("My Gemini checker has reached its usage limit. Please try again later.")
+    if status == 400:
+        return CheckError("Google couldn't accept my Gemini request. An admin needs to check the model and request settings.")
+    return CheckError("Gemini is temporarily unavailable. Please try again later.")
 
 
 class RealityCheck(commands.Cog):

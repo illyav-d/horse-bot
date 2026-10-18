@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
-from horsie.reality_check import CAUTION, CheckError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver
+from horsie.reality_check import CAUTION, CheckError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, gemini_error
 
 
 def message(content="", attachments=None, embeds=None, id=100):
@@ -135,7 +135,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
-    async def call_api(self, status=200, body=None):
+    async def call_api(self, status=200, body=None, model=None):
         response = MagicMock(status=status)
         response.json = AsyncMock(return_value=body)
         session = MagicMock()
@@ -144,12 +144,17 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "REALITY_CHECK_MODEL": "gemini-2.5-flash"}), \
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
                 patch("horsie.reality_check.aiohttp.ClientSession", factory), \
                 patch("horsie.reality_check.aiohttp.TCPConnector"), \
                 patch("horsie.reality_check.download_image", AsyncMock(return_value=("image/png", b"image bytes"))):
+            if model is None:
+                os.environ.pop("REALITY_CHECK_MODEL", None)
+            else:
+                os.environ["REALITY_CHECK_MODEL"] = model
             answer = await assess("image", ["https://example.com/image.png"])
-        self.assertEqual(session.post.call_args.args[0], "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent")
+        expected_model = model or "gemini-3.8-flash"
+        self.assertEqual(session.post.call_args.args[0], f"https://generativelanguage.googleapis.com/v1beta/models/{expected_model}:generateContent")
         self.assertEqual(session.post.call_args.kwargs["headers"], {"x-goog-api-key": "test-key"})
         self.assertFalse(session.post.call_args.kwargs["allow_redirects"])
         return answer, session.post.call_args.kwargs["json"]
@@ -165,6 +170,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inline["mimeType"], "image/png")
         self.assertEqual(base64.b64decode(inline["data"]), b"image bytes")
         self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(payload["generationConfig"]["thinkingConfig"], {"thinkingLevel": "low"})
+        self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 2048)
 
     async def test_api_failures_and_bad_or_incomplete_responses(self):
         for status, body in [(429, {}), (401, {}), (500, {}), (200, {}),
@@ -176,7 +183,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 await self.call_api(status, body)
 
     async def test_combined_size_limit_prevents_api_request(self):
-        with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gemini-2.5-flash"}), \
+        with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gemini-3.8-flash"}), \
                 patch("horsie.reality_check.MAX_TOTAL_IMAGE_BYTES", 2), \
                 patch("horsie.reality_check.download_image", AsyncMock(return_value=("image/png", b"large"))), \
                 self.assertRaisesRegex(CheckError, "too large together"):
@@ -186,6 +193,18 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gpt-4.1-mini"}), \
                 self.assertRaisesRegex(CheckError, "REALITY_CHECK_MODEL"):
             await assess("image", ["https://example.com/image.png"])
+
+    def test_actionable_errors_do_not_expose_google_error_body(self):
+        for status, body, expected in [
+            (404, {"error": {"message": "Model is no longer available to new users"}}, "REALITY_CHECK_MODEL"),
+            (400, {"error": {"message": "API key not valid: secret-key"}}, "GEMINI_API_KEY"),
+            (403, {}, "restrictions"), (429, {}, "usage limit"),
+            (400, {}, "request settings"), (503, None, "temporarily unavailable"),
+        ]:
+            with self.subTest(status=status):
+                result = str(gemini_error(status, body))
+                self.assertIn(expected, result)
+                self.assertNotIn("secret-key", result)
 
 
 class DownloadTests(unittest.IsolatedAsyncioTestCase):
