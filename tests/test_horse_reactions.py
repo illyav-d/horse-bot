@@ -104,6 +104,7 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(bot.extra_events.get("on_message"))
             self.assertIn("process_commands", bot.on_message.__func__.__code__.co_names)
             self.assertIsNotNone(bot.get_command("horsearticle"))
+            self.assertIsNotNone(bot.get_cog("RealityCheck"))
             rat = bot.get_command("rat")
             self.assertIsNotNone(rat)
             message = self.message("!rat")

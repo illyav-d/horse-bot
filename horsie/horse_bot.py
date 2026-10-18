@@ -13,6 +13,7 @@ from datetime import datetime, time, timezone
 from horsie.bot_text import line
 from horsie.horse_reactions import HorseReactions
 from horsie.horse_articles import HorseArticles
+from horsie.reality_check import RealityCheck
 from horsie.game_commands import GameCommands
 from horsie.race_betting import collect_race_bets, winner_pages
 from horsie.data_storage import ASSETS_DIR, data_path, write_json
@@ -853,6 +854,7 @@ async def setup_hook():
     await bot.add_cog(GameCommands(bot, find_xiv_item))
     await bot.add_cog(HorseReactions())
     await bot.add_cog(HorseArticles())
+    await bot.add_cog(RealityCheck(bot))
 
 
 @bot.event

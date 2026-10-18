@@ -37,6 +37,7 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 - A kitchen horse photo whenever someone says "macaroni horse"
 - Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
 - On-demand light horse articles
+- Mention Horsie and ask "is this real?" to assess the latest image for signs of AI generation
 
 ## Version 1.8.5
 
@@ -91,6 +92,15 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 | `!xivtrend <world/DC> <item> [--hq or --nq]` | Compares recent sale prices and current listings; defaults to NQ |
 | `macaroni horse` (no prefix) | Posts the kitchen horse photo |
 | `!horsearticle` | Finds the latest suitable light horse story |
+| `@Horsie is this real?` | Assesses the latest image in this channel for possible AI generation |
+
+## Image Reality Checks
+
+Post or link a still image, then mention the bot and ask `@Horsie is this real?` (select the actual bot mention in Discord). `is it real?`, `is that AI?`, and `real or AI?` also work with a mention. Horsie scans the last 50 messages in that channel and checks the most recent message containing a supported image, skipping intervening chat. An image attached to the question takes priority; replying to a specific image message selects that message instead. The answer links the checked message.
+
+An admin must set `OPENAI_API_KEY` on the host. `REALITY_CHECK_MODEL` optionally overrides the default `gpt-4.1-mini`; use a model supporting images, the Responses API and structured outputs. The selected images are sent to OpenAI for analysis and incur API usage charges. Requests use `store=false`. No API key is stored in the repository. This uses the [OpenAI image input API](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses).
+
+Horsie gives a short **Likely AI-generated**, **Likely authentic**, or **Inconclusive** assessment with reasons and a reminder that it is not proof of origin. It does not verify factual claims, search for originals or authenticate provenance. JPG, PNG and WebP uploads, direct HTTPS image links, and still images exposed by link previews are supported, with up to three images per message and an 8 MB limit per upload. Videos, animated GIFs and links without a readable image need a still screenshot. Only the selected images are analyzed; surrounding chat and image captions are not submitted. Each person can request one check every 30 seconds, with one check per channel and three across the bot at a time. The bot needs Read Message History and permission to send replies. Without an API key, this feature explains that it is not connected; other features continue working.
 
 ## Horse Articles
 
@@ -195,6 +205,8 @@ The bot reads configuration from environment variables.
 | Variable | Required | Description |
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
+| `OPENAI_API_KEY` | For image checks | OpenAI API key used when someone mentions Horsie for an image reality check |
+| `REALITY_CHECK_MODEL` | No | Image assessment model; defaults to `gpt-4.1-mini` |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |
 | `CARROT_FILE` | No | Path to carrot data; defaults to `carrots.json` on the Railway volume, or `data/carrots.json` locally |
 | `FOREVER_CONFIG_FILE` | No | Path to WoW countdown config; defaults to `forever_countdown.json` on the Railway volume, or `data/forever_countdown.json` locally |
