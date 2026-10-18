@@ -1,13 +1,23 @@
 import asyncio
 import base64
+import io
 import os
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
+import aiohttp
+from PIL import Image
 
-from horsie.reality_check import CAUTION, CheckError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, gemini_error
+from horsie.reality_check import CAUTION, GIF_CAUTION, CheckError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, gemini_error, request_gemini, gif_parts
+
+
+def gif_fixture(count=10):
+    frames = [Image.new("RGB", (20, 20), (i * 21 % 256, 255 - i * 19 % 256, i * 13 % 256)) for i in range(count)]
+    output = io.BytesIO()
+    frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], duration=100, loop=0)
+    return output.getvalue()
 
 
 def message(content="", attachments=None, embeds=None, id=100):
@@ -126,7 +136,12 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image_urls(direct), [direct.content])
         embed = discord.Embed(type="rich").set_thumbnail(url="https://example.com/image.png")
         self.assertEqual(image_urls(message(embeds=[embed])), ["https://example.com/image.png"])
-        self.assertEqual(image_urls(message("https://example.com/clip.gif")), [])
+        self.assertEqual(image_urls(message("https://example.com/clip.gif")), ["https://example.com/clip.gif"])
+        self.assertEqual(image_urls(message(attachments=[NS(content_type="image/gif", size=500,
+                                                           url="https://example.com/clip.gif")])), ["https://example.com/clip.gif"])
+        gif_embed = discord.Embed.from_dict({"type": "gifv", "video": {"url": "https://media.tenor.com/id/tenor.mp4"},
+                                            "thumbnail": {"url": "https://media.tenor.com/id/thumbnail.png"}})
+        self.assertEqual(image_urls(message(embeds=[gif_embed])), ["https://media.tenor.com/id/tenor.gif"])
         self.assertEqual(image_urls(message(attachments=[NS(content_type="video/mp4")])), [])
         large = photo()
         large.attachments[0].size = 9 * 1024 * 1024
@@ -135,7 +150,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
-    async def call_api(self, status=200, body=None, model=None):
+    async def call_api(self, status=200, body=None, model=None, mime="image/png", data=b"image bytes"):
         response = MagicMock(status=status)
         response.json = AsyncMock(return_value=body)
         session = MagicMock()
@@ -147,7 +162,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
                 patch("horsie.reality_check.aiohttp.ClientSession", factory), \
                 patch("horsie.reality_check.aiohttp.TCPConnector"), \
-                patch("horsie.reality_check.download_image", AsyncMock(return_value=("image/png", b"image bytes"))):
+                patch("horsie.reality_check.asyncio.sleep", AsyncMock()), \
+                patch("horsie.reality_check.download_image", AsyncMock(return_value=(mime, data))):
             if model is None:
                 os.environ.pop("REALITY_CHECK_MODEL", None)
             else:
@@ -182,6 +198,18 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status, body=body), self.assertRaises(CheckError):
                 await self.call_api(status, body)
 
+    async def test_gif_submits_sampled_jpegs_and_discloses_sampling(self):
+        body = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{
+            "text": '{"verdict":"Inconclusive","reasons":"Only sampled frames are available."}',
+        }]}}]}
+        answer, payload = await self.call_api(body=body, mime="image/gif", data=gif_fixture())
+        self.assertIn(GIF_CAUTION, answer)
+        parts = payload["contents"][0]["parts"]
+        images = [part["inlineData"] for part in parts if "inlineData" in part]
+        self.assertEqual(len(images), 4)
+        self.assertTrue(all(part["mimeType"] == "image/jpeg" for part in images))
+        self.assertIn("frame 10 of 10", parts[-2]["text"])
+
     async def test_combined_size_limit_prevents_api_request(self):
         with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gemini-3.8-flash"}), \
                 patch("horsie.reality_check.MAX_TOTAL_IMAGE_BYTES", 2), \
@@ -207,6 +235,97 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("secret-key", result)
 
 
+class GifTests(unittest.TestCase):
+    def test_samples_first_middle_and_last_frames(self):
+        parts = gif_parts(gif_fixture())
+        labels = [part["text"] for part in parts if "text" in part]
+        self.assertEqual([label.split(" of ")[0] for label in labels],
+                         ["GIF sampled frame 1", "GIF sampled frame 4", "GIF sampled frame 7", "GIF sampled frame 10"])
+        first = Image.open(io.BytesIO(base64.b64decode(parts[1]["inlineData"]["data"])))
+        last = Image.open(io.BytesIO(base64.b64decode(parts[-1]["inlineData"]["data"])))
+        self.assertNotEqual(first.getpixel((10, 10)), last.getpixel((10, 10)))
+
+    def test_single_frame_gif_is_not_duplicated(self):
+        parts = gif_parts(gif_fixture(1))
+        self.assertEqual(len(parts), 2)
+        self.assertIn("frame 1 of 1", parts[0]["text"])
+
+    def test_invalid_and_excessively_long_gifs_have_helpful_errors(self):
+        with self.assertRaises(CheckError):
+            gif_parts(b"GIF89anot-valid")
+        with self.assertRaisesRegex(CheckError, "too long"):
+            gif_parts(gif_fixture(201))
+
+
+class RetryTests(unittest.IsolatedAsyncioTestCase):
+    def session(self, outcomes):
+        session = MagicMock()
+        contexts = []
+        for outcome in outcomes:
+            context = MagicMock()
+            if isinstance(outcome, Exception):
+                context.__aenter__ = AsyncMock(side_effect=outcome)
+            else:
+                response = NS(status=outcome, json=AsyncMock(return_value={"result": "ok"}))
+                context.__aenter__ = AsyncMock(return_value=response)
+            context.__aexit__ = AsyncMock(return_value=False)
+            contexts.append(context)
+        session.post.side_effect = contexts
+        return session
+
+    async def call(self, session):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                patch("horsie.reality_check.asyncio.sleep", AsyncMock()) as sleep:
+            result = await request_gemini(session, "gemini-3.8-flash", {"images": "same payload"})
+        return result, sleep
+
+    async def test_server_failures_recover_without_changing_payload(self):
+        session = self.session([503, 502, 200])
+        result, sleep = await self.call(session)
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(session.post.call_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+        self.assertTrue(1 <= sleep.await_args_list[0].args[0] <= 1.3)
+        self.assertTrue(2 <= sleep.await_args_list[1].args[0] <= 2.3)
+        payloads = [call.kwargs["json"] for call in session.post.call_args_list]
+        self.assertTrue(all(payload is payloads[0] for payload in payloads))
+
+    async def test_exhausted_server_failures_stop_after_three_attempts(self):
+        session = self.session([503, 503, 503])
+        with self.assertRaisesRegex(CheckError, "after three attempts"):
+            await self.call(session)
+        self.assertEqual(session.post.call_count, 3)
+
+    async def test_configuration_and_quota_errors_are_not_retried(self):
+        for status in (400, 401, 403, 404, 429):
+            session = self.session([status])
+            with self.subTest(status=status), self.assertRaises(CheckError):
+                await self.call(session)
+            self.assertEqual(session.post.call_count, 1)
+
+    async def test_connection_failure_and_timeout_can_recover(self):
+        session = self.session([aiohttp.ClientConnectionError(), asyncio.TimeoutError(), 200])
+        result, _ = await self.call(session)
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(session.post.call_count, 3)
+
+    async def test_shared_deadline_cancels_a_hanging_request(self):
+        session = self.session([200])
+        async def wait_forever():
+            await asyncio.Event().wait()
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(side_effect=wait_forever)
+        context.__aexit__ = AsyncMock(return_value=False)
+        session.post.side_effect = None
+        session.post.return_value = context
+        timeout = asyncio.timeout
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                patch("horsie.reality_check.asyncio.timeout", side_effect=lambda _: timeout(0.01)), \
+                self.assertRaises(asyncio.TimeoutError):
+            await request_gemini(session, "gemini-3.8-flash", {})
+        self.assertEqual(session.post.call_count, 1)
+
+
 class DownloadTests(unittest.IsolatedAsyncioTestCase):
     def response(self, data=b"\x89PNG\r\n\x1a\nimage", status=200, headers=None, length=None):
         async def chunks(_):
@@ -228,7 +347,7 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_image_signatures_and_no_key_forwarded_to_image_host(self):
         for data, mime in [(b"\x89PNG\r\n\x1a\nimage", "image/png"),
                            (b"\xff\xd8\xffimage", "image/jpeg"),
-                           (b"RIFF1234WEBPimage", "image/webp")]:
+                           (b"RIFF1234WEBPimage", "image/webp"), (b"GIF89aimage", "image/gif")]:
             session = self.session(self.response(data))
             self.assertEqual(await download_image(session, "https://example.com/a.png"), (mime, data))
             self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
