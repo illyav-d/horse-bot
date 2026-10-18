@@ -10,7 +10,7 @@ import discord
 import aiohttp
 from PIL import Image
 
-from horsie.reality_check import CAUTION, GIF_CAUTION, CheckError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, gemini_error, request_gemini, gif_parts
+from horsie.reality_check import CAUTION, GIF_CAUTION, CheckError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, gemini_error, request_gemini, gif_parts, find_message_images, resolve_image_page
 
 
 def gif_fixture(count=10):
@@ -61,7 +61,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(check.await_args.args[1], [image.attachments[0].url])
                 self.assertIn(image.jump_url, request.reply.await_args.args[0])
                 self.assertFalse(request.reply.await_args.kwargs["allowed_mentions"].everyone)
-                request.channel.history.assert_called_once_with(limit=50, before=request)
+                request.channel.history.assert_called_once_with(limit=None, before=request, oldest_first=False)
 
     async def test_ignores_unmentioned_other_bots_webhooks_dms_and_unrelated_mentions(self):
         cases = [message("is this real?"), message("<@99> is this real?"),
@@ -76,19 +76,19 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
                 msg.reply.assert_not_awaited()
             check.assert_not_awaited()
 
-    async def test_reply_is_explicit_and_cannot_cross_channels(self):
+    async def test_reply_does_not_override_the_asking_users_own_image(self):
         request = message("<@42> is this real?")
-        request.reference = NS(channel_id=20, message_id=90)
-        request.channel.fetch_message.return_value = photo()
-        self.assertEqual((await self.cog.target(request)).id, 90)
-        request.reference.channel_id = 999
-        with self.assertRaises(CheckError):
-            await self.cog.target(request)
-        request.channel.fetch_message.assert_awaited_once()
+        request.reference = NS(channel_id=999, message_id=80)
+        own, other = photo(id=90), photo(id=80)
+        other.author.id = 8
+        history(request.channel, [other, own])
+        selected, _ = await self.cog.target(request)
+        self.assertIs(selected, own)
+        request.channel.fetch_message.assert_not_awaited()
 
     async def test_attached_request_image_takes_priority(self):
         request = photo()
-        self.assertIs(await self.cog.target(request), request)
+        self.assertIs((await self.cog.target(request))[0], request)
 
     async def test_missing_image_and_missing_key_never_call_api(self):
         request = message("<@42> is this real?")
@@ -113,14 +113,59 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.cog.active_channels)
         self.assertIn("couldn't finish", request.reply.await_args.args[0])
 
-    async def test_deleted_reply_does_not_fall_back(self):
+    async def test_another_users_image_is_never_selected(self):
         request = message("<@42> is this real?")
-        request.reference = NS(channel_id=20, message_id=90)
-        request.channel.fetch_message.side_effect = discord.NotFound(NS(status=404, reason="Gone"), "gone")
+        other = photo()
+        other.author.id = 8
+        history(request.channel, [other])
         with patch("horsie.reality_check.assess", AsyncMock()) as check:
             await self.cog.on_message(request)
             check.assert_not_awaited()
+        self.assertIn("your last five messages", request.reply.await_args.args[0])
         self.assertFalse(self.cog.active_channels)
+
+    async def test_five_user_messages_are_counted_not_five_channel_messages(self):
+        request = message("<@42> is this real?")
+        chatter = [message(id=i) for i in range(200, 260)]
+        for other in chatter:
+            other.author.id = 8
+        own = photo()
+        history(request.channel, chatter + [message() for _ in range(4)] + [own])
+        self.assertIs((await self.cog.target(request))[0], own)
+
+    async def test_sixth_user_message_is_outside_search_window(self):
+        request = message("<@42> is this real?")
+        history(request.channel, [message() for _ in range(5)] + [photo()])
+        with self.assertRaisesRegex(CheckError, "last five"):
+            await self.cog.target(request)
+
+    async def test_each_asking_user_gets_their_own_latest_image(self):
+        first, second = message("<@42> is this real?"), message("<@42> is this real?", id=101)
+        second.author.id = 8
+        first_image, second_image = photo(id=90), photo(id=80)
+        second_image.author.id = 8
+        history(first.channel, [first_image, second_image])
+        history(second.channel, [first, first_image, second_image])
+        with patch("horsie.reality_check.assess", AsyncMock(return_value="assessment")):
+            await self.cog.on_message(first)
+            await self.cog.on_message(second)
+        self.assertIn(first_image.jump_url, first.reply.await_args.args[0])
+        self.assertIn(second_image.jump_url, second.reply.await_args.args[0])
+
+    async def test_link_without_discord_preview_is_selected_for_its_author(self):
+        request = message("<@42> is this real?")
+        linked = message("https://tenor.com/view/cat-gif-123", id=90)
+        history(request.channel, [linked, photo(id=80)])
+        with patch("horsie.reality_check.resolve_image_page", AsyncMock(return_value=["https://media.tenor.com/id/tenor.gif"])):
+            selected, images = await self.cog.target(request)
+        self.assertIs(selected, linked)
+        self.assertEqual(images, ["https://media.tenor.com/id/tenor.gif"])
+
+    async def test_newest_of_the_users_image_messages_wins(self):
+        request = message("<@42> is this real?")
+        recent = photo(id=95)
+        history(request.channel, [recent, photo(id=90)])
+        self.assertIs((await self.cog.target(request))[0], recent)
 
     async def test_busy_channel_does_not_start_another_request(self):
         request = message("<@42> is this real?")
@@ -381,3 +426,59 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
                          self.response(length=9 * 1024 * 1024), self.response(b"x" * (8 * 1024 * 1024 + 1))]:
             with self.assertRaises(CheckError):
                 await download_image(self.session(response), "https://example.com/a.png")
+
+
+class LinkResolutionTests(unittest.IsolatedAsyncioTestCase):
+    def session(self, body=b"", content_type="text/html", status=200, headers=None):
+        async def chunks(_):
+            yield body
+        response = NS(status=status, content_type=content_type, headers=headers or {},
+                      content=NS(iter_chunked=chunks))
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=response)
+        context.__aexit__ = AsyncMock(return_value=False)
+        session = MagicMock()
+        session.get.return_value = context
+        return session
+
+    async def test_image_page_resolves_encoded_relative_and_duplicate_metadata(self):
+        session = self.session(b'''<meta content="/cat.gif?a=1&amp;b=2" property="og:image">
+            <meta name="twitter:image" content="/cat.gif?a=1&amp;b=2">''')
+        result = await resolve_image_page(session, "https://example.com/view/cat")
+        self.assertEqual(result, ["https://example.com/cat.gif?a=1&b=2"])
+        self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
+
+    async def test_extensionless_direct_media_is_recognized_by_content_type(self):
+        session = self.session(content_type="image/gif")
+        result = await resolve_image_page(session, "https://example.com/media?id=123")
+        self.assertEqual(result, ["https://example.com/media?id=123"])
+
+    async def test_gif_page_prefers_animation_over_its_static_previews(self):
+        session = self.session(b'''<meta property="og:image" content="/cat.webp">
+            <meta property="og:image:secure_url" content="/cat_s.gif">
+            <meta name="twitter:image" content="/cat.gif">''')
+        self.assertEqual(await resolve_image_page(session, "https://example.com/view"), ["https://example.com/cat.gif"])
+
+    async def test_private_metadata_and_private_redirect_are_rejected(self):
+        session = self.session(b'<meta property="og:image" content="https://127.0.0.1/private.png">')
+        self.assertEqual(await resolve_image_page(session, "https://example.com/view"), [])
+        session = self.session(status=302, headers={"Location": "https://169.254.169.254/a"})
+        with self.assertRaises(CheckError):
+            await resolve_image_page(session, "https://example.com/view")
+        session.get.assert_called_once()
+
+    async def test_page_read_limit_and_nonimage_pages(self):
+        session = self.session(b"x" * (256 * 1024) + b'<meta property="og:image" content="/outside.png">')
+        self.assertEqual(await resolve_image_page(session, "https://example.com/view"), [])
+        self.assertEqual(await resolve_image_page(self.session(content_type="application/pdf"), "https://example.com/view"), [])
+
+    async def test_failed_link_does_not_hide_later_image_link(self):
+        msg = message("https://example.com/not-an-image https://example.com/gallery")
+        with patch("horsie.reality_check.resolve_image_page", AsyncMock(side_effect=[[], ["https://example.com/a.png"]])) as resolve:
+            self.assertEqual(await find_message_images(msg), ["https://example.com/a.png"])
+        self.assertEqual(resolve.await_count, 2)
+
+    async def test_markdown_links_and_extensionless_discord_previews(self):
+        self.assertEqual(image_urls(message("[image](https://example.com/cat.gif)")), ["https://example.com/cat.gif"])
+        embed = discord.Embed(type="image").set_image(url="https://example.com/media?id=1")
+        self.assertEqual(await find_message_images(message(embeds=[embed])), ["https://example.com/media?id=1"])

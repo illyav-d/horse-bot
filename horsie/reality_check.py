@@ -1,4 +1,4 @@
-"""Mention-triggered assessments of the latest image's possible AI origin."""
+"""Mention-triggered assessments of media in the asking user's recent messages."""
 
 import asyncio
 import base64
@@ -8,6 +8,7 @@ import json
 import os
 import random
 import re
+from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
@@ -23,6 +24,7 @@ TRIGGER = re.compile(
 IMAGE_LINK = re.compile(r"https://[^\s<>]+", re.I)
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+MAX_LINK_PAGE_BYTES = 256 * 1024
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024  # Leaves room under Gemini's 20 MB inline request limit.
 CAUTION = "This is an AI assessment, not proof of origin."
@@ -50,6 +52,10 @@ class CheckError(Exception):
     """An expected failure with a safe, user-facing explanation."""
 
 
+def message_links(message):
+    return list(dict.fromkeys(url.rstrip(".,!?;:'\")]}") for url in IMAGE_LINK.findall(message.content)))
+
+
 def image_urls(message):
     """Collect still images and direct image links for bounded downloading."""
     urls = []
@@ -63,8 +69,9 @@ def image_urls(message):
         if embed.type in {"image", "rich", "link", "gifv"}:
             for media in (embed.image, embed.thumbnail):
                 if media:
-                    url = media.proxy_url or media.url
-                    if url and urlsplit(url).path.lower().endswith(IMAGE_EXTENSIONS):
+                    # Prefer the source GIF over a proxy's static preview.
+                    url = media.url if (media.url and urlsplit(media.url).path.lower().endswith(".gif")) else (media.proxy_url or media.url)
+                    if url:
                         if embed.type == "gifv" and not urlsplit(url).path.lower().endswith(".gif"):
                             continue  # A static preview is not the animation.
                         urls.append(url)
@@ -75,7 +82,7 @@ def image_urls(message):
                         (parsed.hostname.endswith(".tenor.com") or parsed.hostname.endswith(".giphy.com"))
                         and parsed.path.endswith(".mp4")):
                     urls.append(parsed._replace(path=parsed.path[:-4] + ".gif").geturl())
-    urls.extend(url for url in IMAGE_LINK.findall(message.content)
+    urls.extend(url for url in message_links(message)
                 if urlsplit(url).path.lower().endswith(IMAGE_EXTENSIONS))
     safe = []
     for url in urls:
@@ -107,6 +114,82 @@ class PublicImageResolver(aiohttp.resolver.ThreadedResolver):
         if any(not ipaddress.ip_address(item["host"]).is_global for item in addresses):
             raise CheckError("Please use a public HTTPS image link.")
         return addresses
+
+
+class ImageLinkMetadata(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.images = []
+
+    def handle_starttag(self, tag, attributes):
+        attrs = dict(attributes)
+        kind = (attrs.get("property") or attrs.get("name") or "").lower()
+        if tag == "meta" and kind in {"og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"}:
+            if attrs.get("content"):
+                self.images.append(attrs["content"])
+
+
+async def resolve_image_page(session, url):
+    """Resolve extensionless media and image-sharing pages without Discord previews."""
+    for _ in range(4):
+        validate_image_url(url)
+        async with session.get(url, allow_redirects=False,
+                               timeout=aiohttp.ClientTimeout(total=4)) as response:
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.headers.get("Location")
+                if not location:
+                    return []
+                url = urljoin(url, location)
+                continue
+            if response.status != 200:
+                return []
+            if response.content_type in IMAGE_TYPES:
+                return [url]
+            if response.content_type not in {"text/html", "application/xhtml+xml"}:
+                return []
+            data = bytearray()
+            async for chunk in response.content.iter_chunked(16 * 1024):
+                data.extend(chunk[:MAX_LINK_PAGE_BYTES - len(data)])
+                if len(data) >= MAX_LINK_PAGE_BYTES:
+                    break
+            parser = ImageLinkMetadata()
+            parser.feed(data.decode("utf-8", errors="replace"))
+            found = []
+            for candidate in parser.images:
+                candidate = urljoin(url, candidate)
+                try:
+                    validate_image_url(candidate)
+                except (CheckError, ValueError):
+                    continue
+                if candidate not in found:
+                    found.append(candidate)
+            # Sharing pages often advertise the same image in several formats.
+            # Prefer the animated GIF over WebP/JPEG and Giphy's static *_s.gif.
+            found.sort(key=lambda candidate: (
+                not urlsplit(candidate).path.lower().endswith(".gif"),
+                urlsplit(candidate).path.lower().endswith("_s.gif"),
+            ))
+            return found[:1]
+    return []
+
+
+async def find_message_images(message):
+    direct = image_urls(message)
+    if direct:
+        return direct
+    links = message_links(message)
+    if not links:
+        return []
+    connector = aiohttp.TCPConnector(resolver=PublicImageResolver())
+    async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
+        for url in links[:3]:
+            try:
+                images = await resolve_image_page(session, url)
+                if images:
+                    return images
+            except (CheckError, ValueError, aiohttp.ClientError, asyncio.TimeoutError):
+                continue
+    return []
 
 
 async def download_image(session, url):
@@ -296,21 +379,20 @@ class RealityCheck(commands.Cog):
         self.active_channels = set()
 
     async def target(self, message):
-        # Explicit replies take precedence and never fall back to unrelated messages.
-        if message.reference:
-            reference = message.reference
-            if reference.channel_id != message.channel.id:
-                raise CheckError("Please reply to a message in this channel.")
-            target = await message.channel.fetch_message(reference.message_id)
-            if image_urls(target):
-                return target
-            raise CheckError("That message has no readable image. Please upload a JPG, PNG, WebP or GIF image.")
-        if image_urls(message):
-            return message
-        async for previous in message.channel.history(limit=50, before=message):
-            if image_urls(previous):
-                return previous
-        raise CheckError("I couldn't find an image in the last 50 messages. Upload a JPG, PNG, WebP or GIF image, then mention me and ask **is this real?**")
+        images = await find_message_images(message)
+        if images:
+            return message, images
+        checked = 0
+        async for previous in message.channel.history(limit=None, before=message, oldest_first=False):
+            if previous.author.id != message.author.id or previous.webhook_id:
+                continue
+            checked += 1
+            images = await find_message_images(previous)
+            if images:
+                return previous, images
+            if checked == 5:
+                break
+        raise CheckError("I couldn't find an image or GIF in your last five messages in this channel. Post an image or image/GIF link, then mention me and ask **is this real?**")
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -335,8 +417,10 @@ class RealityCheck(commands.Cog):
                 return
             self.active_channels.add(message.channel.id)
             try:
-                target = await self.target(message)
-                images = image_urls(target)
+                try:
+                    target, images = await asyncio.wait_for(self.target(message), timeout=15)
+                except asyncio.TimeoutError as error:
+                    raise CheckError("I couldn't finish reading your recent messages and links. Please try again or put the image link in your question.") from error
                 text = "Assess the supplied image(s) for signs of AI generation."
                 async with message.channel.typing():
                     answer = await asyncio.wait_for(assess(text, images), timeout=55)
