@@ -20,8 +20,9 @@ def guild(i, channels):
 async def main():
     c1, c2 = channel(11, "wow-forever-1d-00h"), channel(22, "wow-forever-1d-00h")
     g1, g2 = guild(1, [c1]), guild(2, [c2])
-    with tempfile.TemporaryDirectory() as tmp, patch.object(h, "FOREVER_CONFIG_FILE", Path(tmp)/"config.json"), patch.object(h.bot, "_connection") as state:
+    with tempfile.TemporaryDirectory() as tmp, patch.object(h, "FOREVER_CONFIG_FILE", Path(tmp)/"config.json"), patch.object(h, "CHANGELOG_HISTORY_FILE", Path(tmp)/"changelog.json"), patch.object(h.bot, "_connection") as state:
         state.guilds = [g1, g2]
+        state.user = None
         h.FOREVER_CONFIG_FILE.write_text(json.dumps({"channel_id":11}))
         assert h.get_forever_channel_id(g1) == 11
         assert h.get_forever_channel_id(g2) == 0

@@ -18,6 +18,7 @@ from horsie.game_commands import GameCommands
 from horsie.race_betting import collect_race_bets, winner_pages
 from horsie.data_storage import ASSETS_DIR, data_path, write_json
 from horsie.discord_startup import run_bot
+from horsie.changelog_history import ChangelogHistory
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -35,6 +36,7 @@ FOREVER_CONFIG_FILE = data_path("FOREVER_CONFIG_FILE", "forever_countdown.json")
 
 # Local save file for FFXIV Universalis market watches.
 XIV_WATCH_FILE = data_path("XIV_WATCH_FILE", "xiv_watches.json")
+CHANGELOG_HISTORY_FILE = data_path("CHANGELOG_HISTORY_FILE", "changelog_history.json")
 
 # WoW Forever launch: 5 November 2026 at 00:00 Belgian time (CET).
 # Stored as UTC to keep the countdown timezone-safe.
@@ -48,6 +50,7 @@ FOREVER_CHANNEL_PATTERN = re.compile(
 VERSION = "1.8.6"
 
 CHANGELOG = [
+    "Quick updates now post only new changelog entries if Horsie already posted a changelog within the last hour.",
     "Ping Horsie to check your latest image or GIF for AI. No need to type 'is this real?' anymore.",
     "Klipy animations now work too. Horsie checks a few frames, not the whole movie.",
     "Image checks wait their turn when friends ask together. Cooldowns now explain the wait instead of giving you the silent treatment.",
@@ -612,12 +615,20 @@ async def post_to_guild(guild, sender):
 
 
 async def post_changelog_to_discord():
-    lines = "\n".join(f"- {item}" for item in CHANGELOG)
+    history = ChangelogHistory(CHANGELOG_HISTORY_FILE)
 
     async def send_changelog(channel):
+        now = datetime.now(timezone.utc).timestamp()
+        entries, known = await history.select(
+            guild.id, channel, bot.user.id if bot.user else None, CHANGELOG, now,
+        )
+        if not entries:
+            return
+        lines = "\n".join(f"- {item}" for item in entries)
+        heading = "Changelog additions" if known else "Changelog"
         embed = discord.Embed(
             title=f"Horsie Bot v{VERSION} is online",
-            description=f"**Changelog:**\n{lines}",
+            description=f"**{heading}:**\n{lines}",
         )
         if channel.permissions_for(channel.guild.me).attach_files:
             embed.set_thumbnail(url="attachment://changelog_rat.gif")
@@ -628,6 +639,7 @@ async def post_changelog_to_discord():
                 await channel.send(embed=embed, file=rat)
         else:
             await channel.send(embed=embed)
+        history.record(guild.id, known + entries, now)
 
     for guild in bot.guilds:
         await post_to_guild(guild, send_changelog)

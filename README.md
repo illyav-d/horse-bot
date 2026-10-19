@@ -41,6 +41,7 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 
 ## Version 1.8.6
 
+- If Horsie posted a changelog in the last hour, the next post includes only new entries. History is saved per server across deployments, and no post is sent when there are no additions.
 - Ping Horsie to check your latest image or GIF; typing `is this real?` is optional.
 - Added Klipy animated WebP previews, with up to three sampled frames per check.
 - Up to three image checks can wait their turn, including requests in the same channel. Busy queues and personal cooldowns now give an explicit reply.
