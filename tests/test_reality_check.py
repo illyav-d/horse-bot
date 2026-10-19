@@ -20,6 +20,13 @@ def gif_fixture(count=10):
     return output.getvalue()
 
 
+def webp_fixture(count=247):
+    frames = [Image.new("RGB", (20, 20), (i % 256, 255 - i % 256, 0)) for i in range(count)]
+    output = io.BytesIO()
+    frames[0].save(output, format="WEBP", save_all=True, append_images=frames[1:], duration=40, lossless=True)
+    return output.getvalue()
+
+
 def message(content="", attachments=None, embeds=None, id=100):
     channel = NS(id=20, fetch_message=AsyncMock(), typing=MagicMock())
     channel.typing.return_value.__aenter__ = AsyncMock()
@@ -167,6 +174,21 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
         history(request.channel, [recent, photo(id=90)])
         self.assertIs((await self.cog.target(request))[0], recent)
 
+    async def test_klipy_gif_uses_animated_webp_without_opening_blocked_page(self):
+        request = message("<@42> is this real?")
+        url = "https://static.klipy.com/ii/example/gorilla.webp"
+        embed = discord.Embed.from_dict({
+            "type": "gifv", "thumbnail": {"url": url},
+            "video": {"url": "https://static.klipy.com/ii/example/gorilla.mp4"},
+        })
+        linked = message("https://klipy.com/gifs/gorilla-become-a-gorilla", embeds=[embed], id=90)
+        history(request.channel, [message("intervening chat"), linked])
+        with patch("horsie.reality_check.resolve_image_page", AsyncMock()) as resolve:
+            selected, images = await self.cog.target(request)
+        self.assertIs(selected, linked)
+        self.assertEqual(images, [url])
+        resolve.assert_not_awaited()
+
     async def test_busy_channel_does_not_start_another_request(self):
         request = message("<@42> is this real?")
         self.cog.active_channels.add(request.channel.id)
@@ -256,6 +278,30 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(part.startswith("data:image/jpeg;base64,") for part in images))
         self.assertIn("frame 10 of 10", parts[-2]["text"])
 
+    async def test_animated_webp_submits_first_middle_last_frames(self):
+        body = {"choices": [{"finish_reason": "stop", "message": {
+            "content": '{"verdict":"Inconclusive","reasons":"Sampled frames only."}',
+        }}]}
+        answer, payload = await self.call_api(body=body, mime="image/webp", data=webp_fixture())
+        self.assertIn("Animated WebP assessment uses sampled frames", answer)
+        parts = payload["messages"][1]["content"]
+        images = [p["image_url"]["url"] for p in parts if p.get("type") == "image_url"]
+        self.assertEqual(len(images), 3)
+        self.assertTrue(all(url.startswith("data:image/jpeg;base64,") for url in images))
+        labels = [p["text"] for p in parts if p.get("text", "").startswith("animated WebP")]
+        self.assertEqual([label.split(" of ")[0] for label in labels],
+                         ["animated WebP sampled frame 1", "animated WebP sampled frame 124", "animated WebP sampled frame 247"])
+
+    async def test_static_webp_remains_a_single_image(self):
+        body = {"choices": [{"finish_reason": "stop", "message": {
+            "content": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
+        }}]}
+        answer, payload = await self.call_api(body=body, mime="image/webp", data=webp_fixture(1))
+        parts = payload["messages"][1]["content"]
+        self.assertEqual(len(parts), 2)
+        self.assertTrue(parts[1]["image_url"]["url"].startswith("data:image/webp;base64,"))
+        self.assertNotIn("sampled frames", answer)
+
     async def test_combined_size_limit_prevents_api_request(self):
         with patch.dict(os.environ, {"GROQ_REALITY_CHECK_MODEL": "qwen/qwen3.8-27b"}), \
                 patch("horsie.reality_check.MAX_TOTAL_IMAGE_BYTES", 2), \
@@ -320,6 +366,10 @@ class GifTests(unittest.TestCase):
             gif_parts(b"GIF89anot-valid")
         with self.assertRaisesRegex(CheckError, "too long"):
             gif_parts(gif_fixture(201))
+
+    def test_webp_animation_limits_are_enforced(self):
+        with self.assertRaisesRegex(CheckError, "too long"):
+            gif_parts(webp_fixture(401), media_format="WEBP")
 
 
 class QuotaAndCacheTests(unittest.IsolatedAsyncioTestCase):
