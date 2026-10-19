@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import os
 import unittest
 from types import SimpleNamespace as NS
@@ -10,13 +11,13 @@ import discord
 import aiohttp
 from PIL import Image
 
-from horsie.reality_check import CAUTION, GIF_CAUTION, CheckError, QuotaError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, groq_error, request_groq, gif_parts, find_message_images, resolve_image_page
+from horsie.reality_check import GIF_CAUTION, CheckError, QuotaError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, groq_error, request_groq, gif_parts, find_message_images, resolve_image_page
 
 
-def gif_fixture(count=10):
+def gif_fixture(count=10, durations=100):
     frames = [Image.new("RGB", (20, 20), (i * 21 % 256, 255 - i * 19 % 256, i * 13 % 256)) for i in range(count)]
     output = io.BytesIO()
-    frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], duration=100, loop=0)
+    frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], duration=durations, loop=0)
     return output.getvalue()
 
 
@@ -95,6 +96,24 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
     async def test_attached_request_image_takes_priority(self):
         request = photo()
         self.assertIs((await self.cog.target(request))[0], request)
+
+    async def test_long_reply_preserves_full_explanation_and_source(self):
+        request = message("<@42>")
+        image = photo()
+        history(request.channel, [image])
+        for answer in ("**Inconclusive**\n" + "A complete sentence. " * 200,
+                       "**Inconclusive**\n" + "x" * 4000):
+            with self.subTest(answer=answer[:40]):
+                cog = RealityCheck(NS(user=NS(id=42)))
+                request.reply.reset_mock()
+                with patch("horsie.reality_check.assess", AsyncMock(return_value=answer)):
+                    await cog.on_message(request)
+                parts = [call.args[0] for call in request.reply.await_args_list]
+                self.assertGreater(len(parts), 1)
+                self.assertTrue(all(len(part) <= 2000 for part in parts))
+                self.assertEqual("".join(parts), f"Checking: {image.jump_url}\n" + answer)
+                for call in request.reply.await_args_list:
+                    self.assertFalse(call.kwargs["allowed_mentions"].everyone)
 
     async def test_missing_image_and_missing_key_never_call_api(self):
         request = message("<@42> is this real?")
@@ -257,9 +276,11 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
-    async def call_api(self, status=200, body=None, model=None, mime="image/png", data=b"image bytes", images=None):
+    async def call_api(self, status=200, body=None, model=None, mime="image/png", data=b"image bytes", images=None, responses=None):
         response = MagicMock(status=status)
         response.json = AsyncMock(return_value=body)
+        if responses is not None:
+            response.json.side_effect = responses
         session = MagicMock()
         session.post.return_value.__aenter__ = AsyncMock(return_value=response)
         session.post.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -278,24 +299,75 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             answer = await assess("image", images or ["https://example.com/image.png"])
         expected_model = model or "qwen/qwen3.8-27b"
         self.assertEqual(session.post.call_args.args[0], "https://api.groq.com/openai/v1/chat/completions")
-        self.assertEqual(session.post.call_args.kwargs["json"]["model"], expected_model)
+        self.assertEqual(session.post.call_args_list[0].kwargs["json"]["model"], expected_model)
         self.assertEqual(session.post.call_args.kwargs["headers"], {"Authorization": "Bearer test-key"})
         self.assertFalse(session.post.call_args.kwargs["allow_redirects"])
-        return answer, session.post.call_args.kwargs["json"]
+        self.last_requests = session.post.call_args_list
+        return answer, session.post.call_args_list[0].kwargs["json"]
+
+    def assessment_body(self, verdict="Inconclusive", needs_review=False, reasons="The sampled image is unclear."):
+        return {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
+            "observations": ["An animal is visible."], "needs_review": needs_review,
+            "verdict": verdict, "reasons": reasons,
+        })}}]}
+
+    async def test_review_uses_different_frames_and_can_resolve_uncertainty(self):
+        first = self.assessment_body()
+        review = self.assessment_body("Likely authentic", reasons="The clearer frames show consistent details.")
+        answer, _ = await self.call_api(responses=[first, review], mime="image/gif", data=gif_fixture())
+        self.assertIn("Likely authentic", answer)
+        self.assertEqual(len(self.last_requests), 2)
+        contents = [call.kwargs["json"]["messages"][1]["content"] for call in self.last_requests]
+        frames = [{part["image_url"]["url"] for part in content if part["type"] == "image_url"} for content in contents]
+        self.assertFalse(frames[0] & frames[1])
+        self.assertTrue(all(len(group) <= 3 for group in frames))
+
+    async def test_decisive_first_result_does_not_pay_for_review(self):
+        await self.call_api(body=self.assessment_body("Likely authentic"))
+        self.assertEqual(len(self.last_requests), 1)
+
+    async def test_conflicting_checks_and_unresolved_review_abstain(self):
+        for first, review in ((self.assessment_body("Likely AI-generated", True), self.assessment_body("Likely authentic")),
+                              (self.assessment_body(), self.assessment_body("Likely AI-generated", True))):
+            answer, _ = await self.call_api(responses=[first, review])
+            self.assertTrue(answer.startswith("**Inconclusive**"))
+
+    async def test_failed_review_preserves_first_answer_and_carries_quota_pause(self):
+        for failure in (CheckError("unavailable"), asyncio.TimeoutError(), QuotaError(42)):
+            answer, _ = await self.call_api(responses=[self.assessment_body(), failure, failure, failure])
+            self.assertIn("The sampled image is unclear.", answer)
+            self.assertEqual(getattr(answer, "quota_error", None), failure if isinstance(failure, QuotaError) else None)
+
+    async def test_invalid_observations_are_rejected(self):
+        for observations in ([], [""], [12], ["one"] * 4, "not a list"):
+            body = self.assessment_body()
+            content = json.loads(body["choices"][0]["message"]["content"])
+            content["observations"] = observations
+            body["choices"][0]["message"]["content"] = json.dumps(content)
+            with self.assertRaises(CheckError):
+                await self.call_api(body=body)
 
     async def test_request_and_visible_uncertainty(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
-            "content": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
+            "content": '{"observations":["Visible details are ambiguous."],"needs_review":false,"verdict":"Inconclusive","reasons":"No reliable clues."}',
         }}]}
         answer, payload = await self.call_api(body=body)
-        self.assertIn(CAUTION, answer)
+        self.assertEqual(answer, "**Inconclusive**\nNo reliable clues.")
         self.assertIn("Inconclusive", answer)
         inline = payload["messages"][1]["content"][1]["image_url"]["url"]
         self.assertTrue(inline.startswith("data:image/png;base64,"))
         self.assertEqual(base64.b64decode(inline.split(",", 1)[1]), b"image bytes")
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["reasoning_effort"], "none")
-        self.assertEqual(payload["max_completion_tokens"], 450)
+        self.assertEqual(payload["max_completion_tokens"], 1500)
+
+    async def test_complete_explanation_is_not_sliced_at_1000_characters(self):
+        reasons = "Visible details are ambiguous. " * 45 + "This is the final sentence."
+        body = {"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps({"observations": ["Visible details are ambiguous."], "needs_review": False, "verdict": "Inconclusive", "reasons": reasons}),
+        }}]}
+        answer, _ = await self.call_api(body=body)
+        self.assertEqual(answer, "**Inconclusive**\n" + reasons)
 
     async def test_api_failures_and_bad_or_incomplete_responses(self):
         for status, body in [(429, {}), (401, {}), (500, {}), (200, {}),
@@ -306,35 +378,35 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status, body=body), self.assertRaises(CheckError):
                 await self.call_api(status, body)
 
-    async def test_gif_submits_sampled_jpegs_and_discloses_sampling(self):
+    async def test_gif_submits_sampled_pngs_and_discloses_sampling(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
-            "content": '{"verdict":"Inconclusive","reasons":"Only sampled frames are available."}',
+            "content": '{"observations":["Visible details are ambiguous."],"needs_review":false,"verdict":"Inconclusive","reasons":"Only sampled frames are available."}',
         }}]}
         answer, payload = await self.call_api(body=body, mime="image/gif", data=gif_fixture())
         self.assertIn(GIF_CAUTION, answer)
         parts = payload["messages"][1]["content"]
         images = [part["image_url"]["url"] for part in parts if part.get("type") == "image_url"]
         self.assertEqual(len(images), 3)
-        self.assertTrue(all(part.startswith("data:image/jpeg;base64,") for part in images))
+        self.assertTrue(all(part.startswith("data:image/png;base64,") for part in images))
         self.assertIn("frame 10 of 10", parts[-2]["text"])
 
     async def test_animated_webp_submits_first_middle_last_frames(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
-            "content": '{"verdict":"Inconclusive","reasons":"Sampled frames only."}',
+            "content": '{"observations":["Visible details are ambiguous."],"needs_review":false,"verdict":"Inconclusive","reasons":"Sampled frames only."}',
         }}]}
         answer, payload = await self.call_api(body=body, mime="image/webp", data=webp_fixture())
         self.assertIn("Animated WebP assessment uses sampled frames", answer)
         parts = payload["messages"][1]["content"]
         images = [p["image_url"]["url"] for p in parts if p.get("type") == "image_url"]
         self.assertEqual(len(images), 3)
-        self.assertTrue(all(url.startswith("data:image/jpeg;base64,") for url in images))
+        self.assertTrue(all(url.startswith("data:image/png;base64,") for url in images))
         labels = [p["text"] for p in parts if p.get("text", "").startswith("animated WebP")]
         self.assertEqual([label.split(" of ")[0] for label in labels],
                          ["animated WebP sampled frame 1", "animated WebP sampled frame 124", "animated WebP sampled frame 247"])
 
     async def test_static_webp_remains_a_single_image(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
-            "content": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
+            "content": '{"observations":["Visible details are ambiguous."],"needs_review":false,"verdict":"Inconclusive","reasons":"No reliable clues."}',
         }}]}
         answer, payload = await self.call_api(body=body, mime="image/webp", data=webp_fixture(1))
         parts = payload["messages"][1]["content"]
@@ -351,7 +423,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_multiple_gifs_share_the_three_image_budget(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
-            "content": '{"verdict":"Inconclusive","reasons":"Sampled frames only."}',
+            "content": '{"observations":["Visible details are ambiguous."],"needs_review":false,"verdict":"Inconclusive","reasons":"Sampled frames only."}',
         }}]}
         for count in (2, 3):
             with self.subTest(sources=count):
@@ -362,7 +434,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_groq_model_setting_ignores_old_provider_override(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
-            "content": '{"verdict":"Inconclusive","reasons":"No reliable clues."}',
+            "content": '{"observations":["Visible details are ambiguous."],"needs_review":false,"verdict":"Inconclusive","reasons":"No reliable clues."}',
         }}]}
         with patch.dict(os.environ, {"REALITY_CHECK_MODEL": "gemini-3.8-flash"}):
             _, payload = await self.call_api(body=body)
@@ -387,6 +459,36 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GifTests(unittest.TestCase):
+    def test_playback_time_sampling_handles_a_long_held_frame(self):
+        parts = gif_parts(gif_fixture(10, durations=[900] + [10] * 9))
+        labels = [part["text"] for part in parts if "text" in part]
+        self.assertEqual(len(labels), 2)  # Mid-playback is still the first frame.
+        self.assertIn("frame 1 of 10", labels[0])
+        self.assertIn("frame 10 of 10", labels[1])
+        review = gif_parts(gif_fixture(10, durations=[900] + [10] * 9), alternate=True)
+        self.assertEqual(len(review), 6)
+        self.assertTrue(all("frame 1 of 10" not in part["text"] and "frame 10 of 10" not in part["text"]
+                            for part in review if "text" in part))
+
+    def test_zero_duration_gifs_use_a_safe_fallback(self):
+        parts = gif_parts(gif_fixture(10, durations=0))
+        self.assertEqual(len(parts), 6)
+        self.assertIn("1000 ms", parts[0]["text"])
+
+    def test_sampled_frames_preserve_decoded_pixels_without_lossy_compression(self):
+        for media_format, data in (("GIF", gif_fixture(10)), ("WEBP", webp_fixture(10))):
+            with self.subTest(media_format=media_format), Image.open(io.BytesIO(data)) as source:
+                parts = gif_parts(data, media_format=media_format)
+                for index, part in zip((0, 4, 9), parts[1::2]):
+                    source.seek(index)
+                    rgba = source.convert("RGBA")
+                    expected = Image.new("RGB", rgba.size, "white")
+                    expected.paste(rgba, mask=rgba.getchannel("A"))
+                    encoded = part["image_url"]["url"].split(",", 1)[1]
+                    with Image.open(io.BytesIO(base64.b64decode(encoded))) as actual:
+                        self.assertEqual(actual.format, "PNG")
+                        self.assertEqual(actual.tobytes(), expected.tobytes())
+
     def test_samples_first_middle_and_last_frames(self):
         parts = gif_parts(gif_fixture())
         labels = [part["text"] for part in parts if "text" in part]
@@ -413,6 +515,17 @@ class GifTests(unittest.TestCase):
 
 
 class QuotaAndCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_review_quota_returns_and_caches_answer_but_pauses_new_checks(self):
+        from horsie.reality_check import AssessmentReply
+        cog = RealityCheck(NS(user=NS(id=42)))
+        answer = AssessmentReply("**Inconclusive**\nSome details are unclear.", QuotaError(42))
+        with patch("horsie.reality_check.assess", AsyncMock(return_value=answer)) as check:
+            self.assertEqual(await cog.assessment(message(), ["https://example.com/a.png"]), answer)
+            self.assertIn(answer, await cog.assessment(message(), ["https://example.com/a.png"]))
+            with self.assertRaises(QuotaError):
+                await cog.assessment(message(), ["https://example.com/b.png"])
+            check.assert_awaited_once()
+
     def test_retry_delay_and_daily_quota_are_distinguished(self):
         body = {"error": {"message": "Rate limit reached on tokens per minute (TPM). Please try again in 23.4s."}}
         error = groq_error(429, body)
@@ -481,7 +594,8 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(outcome, Exception):
                 context.__aenter__ = AsyncMock(side_effect=outcome)
             else:
-                response = NS(status=outcome, json=AsyncMock(return_value={"result": "ok"}))
+                status, body = outcome if isinstance(outcome, tuple) else (outcome, {"result": "ok"})
+                response = NS(status=status, json=AsyncMock(return_value=body))
                 context.__aenter__ = AsyncMock(return_value=response)
             context.__aexit__ = AsyncMock(return_value=False)
             contexts.append(context)
@@ -504,6 +618,17 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(2 <= sleep.await_args_list[1].args[0] <= 2.3)
         payloads = [call.kwargs["json"] for call in session.post.call_args_list]
         self.assertTrue(all(payload is payloads[0] for payload in payloads))
+
+    async def test_structured_generation_failure_is_retried_but_bounded(self):
+        failure = (400, {"error": {"code": "json_validate_failed"}})
+        session = self.session([failure, 200])
+        result, _ = await self.call(session)
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(session.post.call_count, 2)
+        session = self.session([failure, failure, failure])
+        with self.assertRaisesRegex(CheckError, "structured image assessment after three attempts"):
+            await self.call(session)
+        self.assertEqual(session.post.call_count, 3)
 
     async def test_exhausted_server_failures_stop_after_three_attempts(self):
         session = self.session([503, 503, 503])
@@ -599,6 +724,56 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LinkResolutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_imgur_rate_limit_is_explicit_and_not_retried_as_more_extensions(self):
+        session = self.session(status=429, content_type="application/json")
+        with self.assertRaisesRegex(CheckError, "Imgur is rate-limiting"):
+            await resolve_image_page(session, "https://imgur.com/abc123")
+        session.get.assert_called_once()
+        with patch("horsie.reality_check.resolve_image_page", AsyncMock(side_effect=CheckError("Imgur is rate-limiting"))):
+            with self.assertRaisesRegex(CheckError, "Imgur is rate-limiting"):
+                await find_message_images(message("https://imgur.com/abc123"))
+
+    async def test_imgur_direct_and_gifv_links_override_static_previews(self):
+        preview = discord.Embed(type="image").set_image(url="https://i.imgur.com/abc123h.jpg")
+        for link, expected in (("https://i.imgur.com/abc123.gifv", "https://i.imgur.com/abc123.gif"),
+                               ("http://imgur.com/abc123.png", "https://i.imgur.com/abc123.png"),
+                               ("https://i.imgur.com/abc123.mp4", "https://i.imgur.com/abc123.gif")):
+            self.assertEqual(image_urls(message(link, embeds=[preview])), [expected])
+        self.assertEqual(image_urls(message("https://imgur.com.evil.test/abc123.gifv")), [])
+
+    async def test_imgur_share_link_resolves_without_javascript(self):
+        session = self.session(content_type="image/gif")
+        self.assertEqual(await resolve_image_page(session, "https://imgur.com/abc123"), ["https://i.imgur.com/abc123.gif"])
+        self.assertEqual(session.get.call_args.args[0], "https://i.imgur.com/abc123.gif")
+        self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
+
+    async def test_reported_imgur_link_uses_identified_media_session(self):
+        from horsie.reality_check import MEDIA_HEADERS
+        session = self.session(content_type="image/jpeg")
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch("horsie.reality_check.aiohttp.ClientSession", factory), patch("horsie.reality_check.aiohttp.TCPConnector"):
+            images = await find_message_images(message("https://imgur.com/EEOQF3o"))
+        self.assertEqual(images, ["https://i.imgur.com/EEOQF3o.gif"])
+        self.assertEqual(factory.call_args.kwargs["headers"], MEDIA_HEADERS)
+
+    async def test_imgur_album_uses_actual_cover_metadata_not_album_id(self):
+        session = self.session(b'<meta property="og:image" content="https://i.imgur.com/actual.png">')
+        self.assertEqual(await resolve_image_page(session, "https://imgur.com/a/album123"), ["https://i.imgur.com/actual.png"])
+        self.assertEqual(session.get.call_args.args[0], "https://imgur.com/a/album123")
+
+    async def test_imgur_animated_metadata_wins_over_static_thumbnail(self):
+        session = self.session(b'<meta property="og:image" content="https://i.imgur.com/still.jpg"><meta property="og:video" content="https://i.imgur.com/animation.mp4">')
+        self.assertEqual(await resolve_image_page(session, "https://imgur.com/a/album123"), ["https://i.imgur.com/animation.gif"])
+
+    async def test_unreadable_imgur_link_does_not_silently_check_an_old_image(self):
+        request = message("<@42> https://imgur.com/a/unreadable")
+        history(request.channel, [photo()])
+        with patch("horsie.reality_check.find_message_images", AsyncMock(return_value=[])):
+            with self.assertRaisesRegex(CheckError, "Imgur"):
+                await RealityCheck(NS(user=NS(id=42))).target(request)
+
     def session(self, body=b"", content_type="text/html", status=200, headers=None):
         async def chunks(_):
             yield body
