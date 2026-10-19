@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.8.5**
+Current version: **1.8.6**
 
 ## Project Layout
 
@@ -37,7 +37,13 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 - A kitchen horse photo whenever someone says "macaroni horse"
 - Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
 - On-demand light horse articles
-- Mention Horsie and ask "is this real?" to assess the latest image for signs of AI generation
+- Ping Horsie to assess your latest image or GIF for signs of AI generation
+
+## Version 1.8.6
+
+- Ping Horsie to check your latest image or GIF; typing `is this real?` is optional.
+- Added Klipy animated WebP previews, with up to three sampled frames per check.
+- Up to three image checks can wait their turn, including requests in the same channel. Busy queues and personal cooldowns now give an explicit reply.
 
 ## Version 1.8.5
 
@@ -92,11 +98,11 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 | `!xivtrend <world/DC> <item> [--hq or --nq]` | Compares recent sale prices and current listings; defaults to NQ |
 | `macaroni horse` (no prefix) | Posts the kitchen horse photo |
 | `!horsearticle` | Finds the latest suitable light horse story |
-| `@Horsie is this real?` | Assesses the latest image in this channel for possible AI generation |
+| `@Horsie` | Assesses your latest image or GIF in this channel for possible AI generation |
 
 ## Image Reality Checks
 
-Post or link an image or GIF, then mention the bot and ask `@Horsie is this real?` (select the actual bot mention in Discord). `is it real?`, `is that AI?`, and `real or AI?` also work with a mention. An image or link in the question takes priority. Otherwise, Horsie checks only the asking user's five previous messages in that channel, newest first, stopping at the first image or GIF. Other people's messages do not count toward those five and their images are never selected, including when replying to another person. If none of your five messages has readable media, Horsie says so. Each request selects its own media; it never reuses the last person's image. The answer links the checked message.
+Post or link an image or GIF, then ping `@Horsie` (select the actual bot mention in Discord). Any direct mention starts a check; no question text is required. Existing questions such as `@Horsie is this real?` still work. An image or link in the question takes priority. Otherwise, Horsie checks only the asking user's five previous messages in that channel, newest first, stopping at the first image or GIF. Other people's messages do not count toward those five and their images are never selected, including when replying to another person. If none of your five messages has readable media, Horsie says so. Each request selects its own media; it never reuses the last person's image. The answer links the checked message.
 
 Uploads, direct HTTPS image/GIF links (including Markdown links), extensionless image URLs, and Discord image/GIF previews are recognized. When Discord has not created a preview, Horsie can open a linked page and read its Open Graph/Twitter image metadata, including image-sharing pages such as Tenor and Giphy. It tries at most three page links per message, reads up to 256 KB of each page, validates public HTTPS destinations and redirects, and caps the entire message/link lookup at 15 seconds. Pages requiring login or lacking readable image metadata may still need a direct image link.
 
@@ -106,7 +112,7 @@ Groq offers a [free plan with request and token limits](https://console.groq.com
 
 Successful assessments of the exact same image URLs, server and model are cached in memory for 30 minutes, up to 128 entries, and can still be returned during a quota pause. Each request first selects the asking user's own media; cached results never choose another person's image. Concurrent checks share one API operation at a time. No images or results are written to disk by this cache, and restart clears it. These measures reduce duplicate usage; they cannot increase Groq's free quota.
 
-Horsie gives a short **Likely AI-generated**, **Likely authentic**, or **Inconclusive** assessment with reasons and a reminder that it is not proof of origin. It does not verify factual claims, search for originals or authenticate provenance. JPG, PNG, WebP and GIF uploads, direct HTTPS image links, and images exposed by link previews are supported, with up to three images per message, an 8 MB limit per image and a 12 MB combined image limit. Downloads require public HTTPS URLs, validate redirects and file signatures, and enforce size limits while streaming. Groq receives at most three image inputs per request, including GIF frames. For GIFs, Horsie samples up to three frames spread across the animation and labels the result as based on sampled frames. When checking multiple images or GIFs together, fewer frames are sampled so each source fits within that three-image budget. It supports uploaded GIFs, direct GIF URLs, and Tenor/Giphy GIF previews exposed by Discord. GIF decoding runs off the Discord event loop, with limits of 200 frames, 16 million pixels per frame, and 100 million total frame pixels; larger animations need a shorter GIF or screenshot. Videos and links without a readable image need a screenshot or direct image/GIF upload. Only the selected images are analyzed; surrounding chat and image captions are not submitted. Each person can request one check every 30 seconds, with one check per channel and three across the bot at a time. The bot needs Read Message History and permission to send replies. Without an API key, this feature explains that it is not connected; other features continue working.
+Horsie gives a short **Likely AI-generated**, **Likely authentic**, or **Inconclusive** assessment with reasons and a reminder that it is not proof of origin. It does not verify factual claims, search for originals or authenticate provenance. JPG, PNG, WebP and GIF uploads, direct HTTPS image links, and images exposed by link previews are supported, with up to three images per message, an 8 MB limit per image and a 12 MB combined image limit. Downloads require public HTTPS URLs, validate redirects and file signatures, and enforce size limits while streaming. Groq receives at most three image inputs per request, including GIF frames. For GIFs, Horsie samples up to three frames spread across the animation and labels the result as based on sampled frames. When checking multiple images or GIFs together, fewer frames are sampled so each source fits within that three-image budget. It supports uploaded GIFs, direct GIF URLs, Tenor/Giphy GIF previews, and Klipy animated WebP previews exposed by Discord. Animated WebPs also use up to three labelled sampled frames. GIF decoding runs off the Discord event loop, with limits of 200 GIF frames or 400 animated WebP frames, 16 million pixels per frame, and 100 million total frame pixels; larger animations need a shorter GIF or screenshot. Videos and links without a readable image need a screenshot or direct image/GIF upload. Only the selected images are analyzed; surrounding chat and image captions are not submitted. Each person can request one check every 30 seconds, with an explicit cooldown reply for repeat requests. Up to three requests can be active or waiting across the bot, including in the same channel. Requests share one API operation at a time; waiting requests receive an acknowledgement, and a full queue gets an explicit retry message. The bot needs Read Message History and permission to send replies. Without an API key, this feature explains that it is not connected; other features continue working.
 
 ## Horse Articles
 

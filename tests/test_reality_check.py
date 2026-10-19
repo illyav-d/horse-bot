@@ -58,7 +58,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mention_variants_find_image_past_intervening_chat(self):
         for text in ["<@42> is this real?", "is it real <@!42>", "<@42> real or AI?",
-                     "<@42> is that AI?", "<@42> if its real"]:
+                     "<@42> is that AI?", "<@42> if its real", "<@42>", "<@!42>", "<@42> hello"]:
             with self.subTest(text=text):
                 cog = RealityCheck(NS(user=NS(id=42)))
                 request, image = message(text), photo()
@@ -70,9 +70,8 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(request.reply.await_args.kwargs["allowed_mentions"].everyone)
                 request.channel.history.assert_called_once_with(limit=None, before=request, oldest_first=False)
 
-    async def test_ignores_unmentioned_other_bots_webhooks_dms_and_unrelated_mentions(self):
-        cases = [message("is this real?"), message("<@99> is this real?"),
-                 message("<@42> hello"), message("<@42> is this reality?")]
+    async def test_ignores_unmentioned_other_bots_webhooks_and_dms(self):
+        cases = [message("is this real?"), message("<@99> is this real?")]
         for field, value in [("author", NS(id=7, bot=True)), ("webhook_id", 8), ("guild", None)]:
             msg = message("<@42> is this real?")
             setattr(msg, field, value)
@@ -103,7 +102,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
         with patch("horsie.reality_check.assess", AsyncMock()) as check:
             await self.cog.on_message(request)
             self.assertIn("couldn't find", request.reply.await_args.args[0])
-            self.assertFalse(self.cog.active_channels)
+            self.assertFalse(self.cog.active_checks)
             with patch.dict(os.environ, {"GROQ_API_KEY": ""}):
                 request.author.id = 8
                 await self.cog.on_message(request)
@@ -117,8 +116,9 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
             await self.cog.on_message(request)
             await self.cog.on_message(request)
             check.assert_awaited_once()
-        self.assertFalse(self.cog.active_channels)
-        self.assertIn("couldn't finish", request.reply.await_args.args[0])
+        self.assertFalse(self.cog.active_checks)
+        self.assertIn("couldn't finish", request.reply.await_args_list[0].args[0])
+        self.assertIn("Please wait about", request.reply.await_args.args[0])
 
     async def test_another_users_image_is_never_selected(self):
         request = message("<@42> is this real?")
@@ -129,7 +129,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
             await self.cog.on_message(request)
             check.assert_not_awaited()
         self.assertIn("your last five messages", request.reply.await_args.args[0])
-        self.assertFalse(self.cog.active_channels)
+        self.assertFalse(self.cog.active_checks)
 
     async def test_five_user_messages_are_counted_not_five_channel_messages(self):
         request = message("<@42> is this real?")
@@ -189,14 +189,54 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(images, [url])
         resolve.assert_not_awaited()
 
-    async def test_busy_channel_does_not_start_another_request(self):
-        request = message("<@42> is this real?")
-        self.cog.active_channels.add(request.channel.id)
+    async def test_full_queue_does_not_start_another_request(self):
+        request = message("<@42>")
+        self.cog.active_checks.update({1, 2, 3})
         with patch("horsie.reality_check.assess", AsyncMock()) as check:
             await self.cog.on_message(request)
             check.assert_not_awaited()
-        self.assertIn("already checking", request.reply.await_args.args[0])
-        self.assertIn(request.channel.id, self.cog.active_channels)
+        self.assertIn("queue is full", request.reply.await_args.args[0])
+        self.assertEqual(self.cog.active_checks, {1, 2, 3})
+
+    async def test_same_channel_checks_wait_and_keep_each_users_media(self):
+        first, second = photo(id=100), photo(id=101)
+        first.content = second.content = "<@42>"
+        second.author.id = 8
+        second.channel = first.channel
+        second.attachments[0].url = "https://example.com/second.png"
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_assess(text, images):
+            if images == [first.attachments[0].url]:
+                started.set()
+                await release.wait()
+            return "assessment for " + images[0]
+
+        with patch("horsie.reality_check.assess", AsyncMock(side_effect=slow_assess)) as check:
+            first_task = asyncio.create_task(self.cog.on_message(first))
+            second_task = None
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                acknowledged = asyncio.Event()
+                async def reply(*args, **kwargs):
+                    acknowledged.set()
+                second.reply.side_effect = reply
+                second_task = asyncio.create_task(self.cog.on_message(second))
+                await asyncio.wait_for(acknowledged.wait(), timeout=2)
+                self.assertIn("check yours next", second.reply.await_args.args[0])
+                self.assertEqual(check.await_count, 1)
+                release.set()
+                await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=2)
+            finally:
+                release.set()
+                for task in (first_task, second_task):
+                    if task is not None and not task.done():
+                        task.cancel()
+                await asyncio.gather(*(task for task in (first_task, second_task) if task is not None), return_exceptions=True)
+        self.assertEqual(check.await_count, 2)
+        self.assertIn(first.attachments[0].url, first.reply.await_args.args[0])
+        self.assertIn(second.attachments[0].url, second.reply.await_args.args[0])
+        self.assertFalse(self.cog.active_checks)
 
     def test_links_previews_and_unsupported_files(self):
         direct = message("https://example.com/image.jpg?x=1")

@@ -19,10 +19,6 @@ from PIL import Image, UnidentifiedImageError
 from discord.ext import commands
 
 
-TRIGGER = re.compile(
-    r"\b(?:(?:is|was)\s+(?:this|that|it)\s+real|(?:if\s+)?it['\u2019]?s\s+real|"
-    r"real\s+or\s+(?:ai|fake)|(?:is|was)\s+(?:this|that|it)\s+(?:ai|fake))\b", re.I,
-)
 IMAGE_LINK = re.compile(r"https://[^\s<>]+", re.I)
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
@@ -422,7 +418,7 @@ class RealityCheck(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.cooldowns = commands.CooldownMapping.from_cooldown(1, 30, commands.BucketType.user)
-        self.active_channels = set()
+        self.active_checks = set()
         self.api_lock = asyncio.Lock()
         self.blocked_until = 0
         self.blocked_daily = False
@@ -466,7 +462,7 @@ class RealityCheck(commands.Cog):
                 return previous, images
             if checked == 5:
                 break
-        raise CheckError("I couldn't find an image or GIF in your last five messages in this channel. Post an image or image/GIF link, then mention me and ask **is this real?**")
+        raise CheckError("I couldn't find an image or GIF in your last five messages in this channel. Post an image or image/GIF link, then mention me.")
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -474,9 +470,9 @@ class RealityCheck(commands.Cog):
             return
         if self.bot.user is None or not re.search(rf"<@!?{self.bot.user.id}>", message.content):
             return
-        if not TRIGGER.search(message.content):
-            return
-        if self.cooldowns.get_bucket(message).update_rate_limit():
+        retry_after = self.cooldowns.get_bucket(message).update_rate_limit()
+        if retry_after:
+            await self.send_error(message, f"Please wait about {math.ceil(retry_after)} seconds before asking for another image check. Your earlier check may still be running.")
             return
         try:
             if not os.getenv("GROQ_API_KEY", "").strip():
@@ -485,12 +481,16 @@ class RealityCheck(commands.Cog):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
-            if message.channel.id in self.active_channels or len(self.active_channels) >= 3:
-                await message.reply("I'm already checking something. Please try again shortly.",
+            if len(self.active_checks) >= 3:
+                await message.reply("My image-check queue is full (three requests). Please try again shortly.",
                                     allowed_mentions=discord.AllowedMentions.none())
                 return
-            self.active_channels.add(message.channel.id)
+            waiting = bool(self.active_checks)
+            self.active_checks.add(message.id)
             try:
+                if waiting:
+                    await message.reply("I'll check yours next. Another image check is already in progress.",
+                                        allowed_mentions=discord.AllowedMentions.none())
                 try:
                     target, images = await asyncio.wait_for(self.target(message), timeout=15)
                 except asyncio.TimeoutError as error:
@@ -500,7 +500,7 @@ class RealityCheck(commands.Cog):
                 source = f"Checking: {target.jump_url}\n" if target.id != message.id else ""
                 await message.reply(source + answer, allowed_mentions=discord.AllowedMentions.none())
             finally:
-                self.active_channels.discard(message.channel.id)
+                self.active_checks.discard(message.id)
         except CheckError as error:
             await self.send_error(message, str(error))
         except (asyncio.TimeoutError, aiohttp.ClientError, ValueError):
