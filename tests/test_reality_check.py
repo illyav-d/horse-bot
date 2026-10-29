@@ -128,16 +128,35 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("GROQ_API_KEY", request.reply.await_args.args[0])
             check.assert_not_awaited()
 
-    async def test_cooldown_and_failure_release_busy_channel(self):
+    async def test_failed_checks_can_be_retried_without_personal_cooldown(self):
         request = message("<@42> is this real?")
         history(request.channel, [photo()])
         with patch("horsie.reality_check.assess", AsyncMock(side_effect=asyncio.TimeoutError)) as check:
             await self.cog.on_message(request)
             await self.cog.on_message(request)
-            check.assert_awaited_once()
+            self.assertEqual(check.await_count, 2)
         self.assertFalse(self.cog.active_checks)
         self.assertIn("couldn't finish", request.reply.await_args_list[0].args[0])
+        self.assertIn("couldn't finish", request.reply.await_args.args[0])
+
+    async def test_successful_check_still_limits_repeated_requests(self):
+        request = photo()
+        request.content = "<@42>"
+        with patch("horsie.reality_check.assess", AsyncMock(return_value="assessment")) as check:
+            await self.cog.on_message(request)
+            await self.cog.on_message(request)
+        check.assert_awaited_once()
         self.assertIn("Please wait about", request.reply.await_args.args[0])
+
+    async def test_missing_image_does_not_block_a_corrected_request(self):
+        request = message("<@42>")
+        history(request.channel, [])
+        await self.cog.on_message(request)
+        request.attachments = photo().attachments
+        with patch("horsie.reality_check.assess", AsyncMock(return_value="assessment")) as check:
+            await self.cog.on_message(request)
+        check.assert_awaited_once()
+        self.assertEqual(request.reply.await_args.args[0], "assessment")
 
     async def test_another_users_image_is_never_selected(self):
         request = message("<@42> is this real?")
@@ -216,6 +235,11 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
             check.assert_not_awaited()
         self.assertIn("queue is full", request.reply.await_args.args[0])
         self.assertEqual(self.cog.active_checks, {1, 2, 3})
+        self.cog.active_checks.clear()
+        request.attachments = photo().attachments
+        with patch("horsie.reality_check.assess", AsyncMock(return_value="assessment")) as check:
+            await self.cog.on_message(request)
+        check.assert_awaited_once()
 
     async def test_same_channel_checks_wait_and_keep_each_users_media(self):
         first, second = photo(id=100), photo(id=101)
@@ -276,7 +300,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
-    async def call_api(self, status=200, body=None, model=None, mime="image/png", data=b"image bytes", images=None, responses=None):
+    async def call_api(self, status=200, body=None, model=None, mime="image/png", data=b"image bytes", images=None, responses=None, review=False):
         response = MagicMock(status=status)
         response.json = AsyncMock(return_value=body)
         if responses is not None:
@@ -287,7 +311,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
-        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), \
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key", "GROQ_REALITY_CHECK_REVIEW": "true" if review else ""}), \
                 patch("horsie.reality_check.aiohttp.ClientSession", factory), \
                 patch("horsie.reality_check.aiohttp.TCPConnector"), \
                 patch("horsie.reality_check.asyncio.sleep", AsyncMock()), \
@@ -314,7 +338,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_review_uses_different_frames_and_can_resolve_uncertainty(self):
         first = self.assessment_body()
         review = self.assessment_body("Likely authentic", reasons="The clearer frames show consistent details.")
-        answer, _ = await self.call_api(responses=[first, review], mime="image/gif", data=gif_fixture())
+        answer, _ = await self.call_api(responses=[first, review], mime="image/gif", data=gif_fixture(), review=True)
         self.assertIn("Likely authentic", answer)
         self.assertEqual(len(self.last_requests), 2)
         contents = [call.kwargs["json"]["messages"][1]["content"] for call in self.last_requests]
@@ -326,15 +350,21 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await self.call_api(body=self.assessment_body("Likely authentic"))
         self.assertEqual(len(self.last_requests), 1)
 
+    async def test_uncertain_results_use_one_call_by_default(self):
+        for verdict, flagged in [("Inconclusive", False), ("Likely authentic", True)]:
+            answer, _ = await self.call_api(body=self.assessment_body(verdict, flagged))
+            self.assertEqual(len(self.last_requests), 1)
+            self.assertIn("Inconclusive", answer)
+
     async def test_conflicting_checks_and_unresolved_review_abstain(self):
         for first, review in ((self.assessment_body("Likely AI-generated", True), self.assessment_body("Likely authentic")),
                               (self.assessment_body(), self.assessment_body("Likely AI-generated", True))):
-            answer, _ = await self.call_api(responses=[first, review])
+            answer, _ = await self.call_api(responses=[first, review], review=True)
             self.assertTrue(answer.startswith("**Inconclusive**"))
 
     async def test_failed_review_preserves_first_answer_and_carries_quota_pause(self):
         for failure in (CheckError("unavailable"), asyncio.TimeoutError(), QuotaError(42)):
-            answer, _ = await self.call_api(responses=[self.assessment_body(), failure, failure, failure])
+            answer, _ = await self.call_api(responses=[self.assessment_body(), failure, failure, failure], review=True)
             self.assertIn("The sampled image is unclear.", answer)
             self.assertEqual(getattr(answer, "quota_error", None), failure if isinstance(failure, QuotaError) else None)
 
@@ -359,7 +389,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base64.b64decode(inline.split(",", 1)[1]), b"image bytes")
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["reasoning_effort"], "none")
-        self.assertEqual(payload["max_completion_tokens"], 1500)
+        self.assertEqual(payload["max_completion_tokens"], 768)
 
     async def test_complete_explanation_is_not_sliced_at_1000_characters(self):
         reasons = "Visible details are ambiguous. " * 45 + "This is the final sentence."
@@ -571,6 +601,24 @@ class QuotaAndCacheTests(unittest.IsolatedAsyncioTestCase):
             cog.blocked_until = asyncio.get_running_loop().time() + 60
             self.assertIn("cached", await cog.assessment(message(), ["https://example.com/one.png"]))
         check.assert_awaited_once()
+
+    async def test_quota_refusals_do_not_extend_pause_and_checks_resume_after_expiry(self):
+        cog = RealityCheck(NS(user=NS(id=42)))
+        request = photo()
+        request.content = "<@42>"
+        cog.blocked_until = asyncio.get_running_loop().time() + 60
+        original_deadline = cog.blocked_until
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), \
+                patch("horsie.reality_check.assess", AsyncMock(return_value="assessment")) as check:
+            for _ in range(2):
+                await cog.on_message(request)
+                self.assertIn("Groq is rate-limiting", request.reply.await_args.args[0])
+                self.assertEqual(cog.blocked_until, original_deadline)
+            check.assert_not_awaited()
+            cog.blocked_until = asyncio.get_running_loop().time() - 1
+            await cog.on_message(request)
+            check.assert_awaited_once()
+        self.assertEqual(request.reply.await_args.args[0], "assessment")
 
     async def test_expired_results_are_refreshed_and_simultaneous_checks_share_result(self):
         cog = RealityCheck(NS(user=NS(id=42)))

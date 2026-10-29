@@ -408,7 +408,7 @@ async def assess(text, images, *, image_loader=None):
             {"role": "system", "content": INSTRUCTIONS},
             {"role": "user", "content": content},
         ],
-        "max_completion_tokens": 1500,
+        "max_completion_tokens": 768,
         "reasoning_effort": "none",
         "response_format": {"type": "json_schema", "json_schema": {
             "name": "reality_check", "strict": True,
@@ -429,7 +429,8 @@ async def assess(text, images, *, image_loader=None):
         assessment = parse_assessment(result)
         review_quota = None
         review_budget = min(12, 50 - (asyncio.get_running_loop().time() - started))
-        if (assessment["needs_review"] or assessment["verdict"] == "Inconclusive") and review_budget >= 3:
+        review_enabled = os.getenv("GROQ_REALITY_CHECK_REVIEW", "").strip().lower() in {"1", "true", "yes"}
+        if review_enabled and (assessment["needs_review"] or assessment["verdict"] == "Inconclusive") and review_budget >= 3:
             try:
                 async with asyncio.timeout(review_budget):
                     review_content = list(content)
@@ -638,10 +639,13 @@ class RealityCheck(commands.Cog):
             return
         if self.bot.user is None or not re.search(rf"<@!?{self.bot.user.id}>", message.content):
             return
-        retry_after = self.cooldowns.get_bucket(message).update_rate_limit()
+        bucket = self.cooldowns.get_bucket(message)
+        retry_after = bucket.get_retry_after()
         if retry_after:
             await self.send_error(message, f"Please wait about {math.ceil(retry_after)} seconds before asking for another image check. Your earlier check may still be running.")
             return
+        reserved = False
+        completed = False
         try:
             if not os.getenv("GROQ_API_KEY", "").strip():
                 await message.reply(
@@ -653,6 +657,9 @@ class RealityCheck(commands.Cog):
                 await message.reply("My image-check queue is full (three requests). Please try again shortly.",
                                     allowed_mentions=discord.AllowedMentions.none())
                 return
+            # Reserve while running, but only successful checks consume the cooldown.
+            bucket.update_rate_limit()
+            reserved = True
             waiting = bool(self.active_checks)
             self.active_checks.add(message.id)
             try:
@@ -668,6 +675,7 @@ class RealityCheck(commands.Cog):
                 source = f"Checking: {target.jump_url}\n" if target.id != message.id else ""
                 for part in reply_parts(source + answer):
                     await message.reply(part, allowed_mentions=discord.AllowedMentions.none())
+                completed = True
             finally:
                 self.active_checks.discard(message.id)
         except CheckError as error:
@@ -676,6 +684,9 @@ class RealityCheck(commands.Cog):
             await self.send_error(message, "My AI checker couldn't finish. Please try again later.")
         except discord.HTTPException:
             await self.send_error(message, "I couldn't read or reply to that message. Check my channel and message history permissions.")
+        finally:
+            if reserved and not completed:
+                bucket.reset()
 
     async def send_error(self, message, text):
         try:
