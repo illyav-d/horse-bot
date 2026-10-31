@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.8.6**
+Current version: **1.8.7**
 
 ## Project Layout
 
@@ -39,43 +39,9 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 - On-demand light horse articles
 - Ping Horsie to assess your latest image or GIF for signs of AI generation
 
-## Version 1.8.6
+## Version 1.8.7
 
-- If Horsie posted a changelog in the last hour, the next post includes only new entries. History is saved per server across deployments, and no post is sent when there are no additions.
-- Ping Horsie to check your latest image or GIF; typing `is this real?` is optional.
-- Added Klipy animated WebP previews, with up to three sampled frames per check.
-- Up to three image checks can wait their turn, including requests in the same channel. Busy queues and personal cooldowns now give an explicit reply.
-
-## Version 1.8.5
-
-- `!horsearticle` opens live article pages and searches archives beyond the current feeds, including Horse Nation. It shows **Searching...** while it reads and keeps filtering for light stories without repeats.
-- Carrot balances and article history use the attached Railway volume, so updates preserve progress. Old carrot snapshots are no longer shipped in Git, and saves are written atomically.
-- Added a standard Python entry point so hosting platforms can detect how to start Horsie.
-
-## Version 1.8.4
-
-- Horsie read a book. More horse facts.
-- Added 30 facts about whiskers, colours, movement, ponies, and horse behaviour. Tidied up a few duplicate or questionable older claims.
-- New fact references are listed in [HORSE_FACT_SOURCES.md](docs/HORSE_FACT_SOURCES.md). Facts appear in both `!horsefact` and horse posts through the existing shuffled rotation.
-
-## Version 1.8.3
-
-- `!horsearticle` finds a happy horse story. If you've seen one already, Horsie digs up another.
-
-## Version 1.8.2
-
-- Say `macaroni horse`. You know what happens.
-- Gave Horsie a few more things to say. He was repeating himself.
-
-## Version 1.8.1
-
-- One race at a time per channel now. Four horses were enough chaos.
-- Fixed picks getting missed when everyone answered at once. You can change your pick until bets close.
-- `!wow` checks retail characters. `!xivtrend` checks FFXIV prices. Classic cards and raid recaps can wait.
-
-## Version 1.7.1
-
-- Daily horses, changelogs and the Forever countdown now work across servers. Horsie has discovered sharing.
+- Horsie now describes what it sees in pictures and gives a fuller explanation of its AI verdict.
 
 ## Commands
 
@@ -111,9 +77,9 @@ An admin must set `GROQ_API_KEY` on the host (Railway service > Variables). Crea
 
 Groq offers a [free plan with request and token limits](https://console.groq.com/docs/rate-limits). The Qwen vision model counts each image or sampled GIF frame as 2,048 input tokens; token limits can be reached before the request ceiling. For quota errors, Horsie uses the `Retry-After` header or retry duration in the response (60 seconds if none is provided) and distinguishes explicit daily quotas from short-term limits. It pauses new API checks across the bot during that delay. Temporary server failures (including HTTP 503), explicit structured-output generation failures (`json_validate_failed`), and connection failures are retried up to twice, with short exponential delays and jitter. API attempts share a 40-second deadline inside the existing 55-second overall check limit. Invalid keys, access errors, model errors and quota errors are not retried.
 
-Successful assessments of the exact same image URLs, server and model are cached in memory for 30 minutes, up to 128 entries, and can still be returned during a quota pause. Each request first selects the asking user's own media; cached results never choose another person's image. Concurrent checks share one API operation at a time. No images or results are written to disk by this cache, and restart clears it. These measures reduce duplicate usage; they cannot increase Groq's free quota. The model records brief visible observations before choosing a verdict. Each check uses one assessment by default to conserve the shared quota. Set `GROQ_REALITY_CHECK_REVIEW=true` to enable at most one independent second look for inconclusive or flagged ambiguous results, with different GIF/WebP frames where available. This optional review can nearly double token usage for uncertain checks. The output token allowance is capped at 768 for the short structured reply. Conflicting or unresolved checks return Inconclusive. The optional review has at most 12 seconds within the overall 55-second check limit; failure preserves the first usable answer, and review quota errors still pause new checks. See [the evaluation guide](docs/REALITY_CHECK_EVALUATION.md) for the five-case regression set and live evaluation runner.
+Successful assessments of the exact same image URLs, server and model are cached in memory for 30 minutes, up to 128 entries, and can still be returned during a quota pause. Each request first selects the asking user's own media; cached results never choose another person's image. Concurrent checks share one API operation at a time. No images or results are written to disk by this cache, and restart clears it. These measures reduce duplicate usage; they cannot increase Groq's free quota. The model describes the visible subjects, actions, setting and distinctive details before explaining its verdict. Each check uses one assessment by default to conserve the shared quota. Set `GROQ_REALITY_CHECK_REVIEW=true` to enable at most one independent second look for inconclusive or flagged ambiguous results, with different GIF/WebP frames where available. This optional review can nearly double token usage for uncertain checks. The output token allowance is capped at 1280 for the scene description and explanation, with prompt budgets of 600 characters for observations and 900 for reasons. Conflicting or unresolved checks return Inconclusive. The optional review has at most 12 seconds within the overall 55-second check limit; failure preserves the first usable answer, and review quota errors still pause new checks. See [the evaluation guide](docs/REALITY_CHECK_EVALUATION.md) for the five-case regression set and live evaluation runner.
 
-Horsie gives a short **Likely AI-generated**, **Likely authentic**, or **Inconclusive** assessment with complete reasons, without a generic disclaimer footer. Longer replies are split across Discord messages rather than cut off. It does not verify factual claims, search for originals or authenticate provenance. JPG, PNG, WebP and GIF uploads, direct HTTPS image links, and images exposed by link previews are supported, with up to three images per message, an 8 MB limit per image and a 12 MB combined image limit. Downloads require public HTTPS URLs, validate redirects and file signatures, and enforce size limits while streaming. Groq receives at most three image inputs per API call, including GIF frames. For GIFs, Horsie samples up to three frames by playback time, respecting frame durations and labels the result as based on sampled frames. Sampled GIF/WebP frames use lossless PNG to avoid adding JPEG artifacts. The prompt distinguishes ordinary GIF palette, transparency and motion-blur artifacts from evidence of AI generation. When checking multiple images or GIFs together, fewer frames are sampled so each source fits within that three-image budget. It supports Imgur single-image sharing links, direct image/GIF/GIFV links, album/gallery cover metadata when readable, uploaded GIFs, direct GIF URLs, Tenor/Giphy GIF previews, and Klipy animated WebP previews exposed by Discord. Animated WebPs also use up to three labelled sampled frames. GIF decoding runs off the Discord event loop, with limits of 200 GIF frames or 400 animated WebP frames, 16 million pixels per frame, and 100 million total frame pixels; larger animations need a shorter GIF or screenshot. Videos and links without a readable image need a screenshot or direct image/GIF upload. Only the selected images are analyzed; surrounding chat and image captions are not submitted. Each person can request one successful check every 30 seconds, with an explicit cooldown reply for repeat requests. Failed checks, missing images, missing API configuration, and full queues do not consume the personal cooldown; a failed request can be corrected and retried immediately. A real Groq quota pause still applies across users until its retry delay expires, even when nobody is currently asking for checks. Up to three requests can be active or waiting across the bot, including in the same channel. Requests share one API operation at a time; waiting requests receive an acknowledgement, and a full queue gets an explicit retry message. The bot needs Read Message History and permission to send replies. Without an API key, this feature explains that it is not connected; other features continue working.
+Horsie gives a **Likely AI-generated**, **Likely authentic**, or **Inconclusive** assessment followed by a **What I see** scene description and a **Why** explanation of the visible clues and uncertainty, without a generic disclaimer footer. Longer replies are split across Discord messages rather than cut off. It does not verify factual claims, search for originals or authenticate provenance. JPG, PNG, WebP and GIF uploads, direct HTTPS image links, and images exposed by link previews are supported, with up to three images per message, an 8 MB limit per image and a 12 MB combined image limit. Downloads require public HTTPS URLs, validate redirects and file signatures, and enforce size limits while streaming. Groq receives at most three image inputs per API call, including GIF frames. For GIFs, Horsie samples up to three frames by playback time, respecting frame durations and labels the result as based on sampled frames. Sampled GIF/WebP frames use lossless PNG to avoid adding JPEG artifacts. The prompt distinguishes ordinary GIF palette, transparency and motion-blur artifacts from evidence of AI generation. When checking multiple images or GIFs together, fewer frames are sampled so each source fits within that three-image budget. It supports Imgur single-image sharing links, direct image/GIF/GIFV links, album/gallery cover metadata when readable, uploaded GIFs, direct GIF URLs, Tenor/Giphy GIF previews, and Klipy animated WebP previews exposed by Discord. Animated WebPs also use up to three labelled sampled frames. GIF decoding runs off the Discord event loop, with limits of 200 GIF frames or 400 animated WebP frames, 16 million pixels per frame, and 100 million total frame pixels; larger animations need a shorter GIF or screenshot. Videos and links without a readable image need a screenshot or direct image/GIF upload. Only the selected images are analyzed; surrounding chat and image captions are not submitted. Each person can request one successful check every 30 seconds, with an explicit cooldown reply for repeat requests. Failed checks, missing images, missing API configuration, and full queues do not consume the personal cooldown; a failed request can be corrected and retried immediately. A real Groq quota pause still applies across users until its retry delay expires, even when nobody is currently asking for checks. Up to three requests can be active or waiting across the bot, including in the same channel. Requests share one API operation at a time; waiting requests receive an acknowledgement, and a full queue gets an explicit retry message. The bot needs Read Message History and permission to send replies. Without an API key, this feature explains that it is not connected; other features continue working.
 
 ## Horse Articles
 

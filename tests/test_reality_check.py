@@ -382,14 +382,14 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             "content": '{"observations":["Visible details are ambiguous."],"needs_review":false,"verdict":"Inconclusive","reasons":"No reliable clues."}',
         }}]}
         answer, payload = await self.call_api(body=body)
-        self.assertEqual(answer, "**Inconclusive**\nNo reliable clues.")
+        self.assertEqual(answer, "**Inconclusive**\n\n**What I see:** Visible details are ambiguous.\n\n**Why:** No reliable clues.")
         self.assertIn("Inconclusive", answer)
         inline = payload["messages"][1]["content"][1]["image_url"]["url"]
         self.assertTrue(inline.startswith("data:image/png;base64,"))
         self.assertEqual(base64.b64decode(inline.split(",", 1)[1]), b"image bytes")
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["reasoning_effort"], "none")
-        self.assertEqual(payload["max_completion_tokens"], 768)
+        self.assertEqual(payload["max_completion_tokens"], 1280)
 
     async def test_complete_explanation_is_not_sliced_at_1000_characters(self):
         reasons = "Visible details are ambiguous. " * 45 + "This is the final sentence."
@@ -397,7 +397,19 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             "content": json.dumps({"observations": ["Visible details are ambiguous."], "needs_review": False, "verdict": "Inconclusive", "reasons": reasons}),
         }}]}
         answer, _ = await self.call_api(body=body)
-        self.assertEqual(answer, "**Inconclusive**\n" + reasons)
+        self.assertEqual(answer, "**Inconclusive**\n\n**What I see:** Visible details are ambiguous.\n\n**Why:** " + reasons)
+
+    async def test_scene_description_survives_uncertain_verdict_and_escapes_markdown(self):
+        observations = ["A **brown horse** stands beside a fence.",
+                        "Green fields and a red barn fill the background."]
+        body = self.assessment_body("Likely authentic", needs_review=True)
+        content = json.loads(body["choices"][0]["message"]["content"])
+        content["observations"] = observations
+        body["choices"][0]["message"]["content"] = json.dumps(content)
+        answer, _ = await self.call_api(body=body)
+        self.assertTrue(answer.startswith("**Inconclusive**"))
+        self.assertIn("**What I see:** " + discord.utils.escape_markdown(" ".join(observations)), answer)
+        self.assertIn("**Why:** The visible details remain ambiguous", answer)
 
     async def test_api_failures_and_bad_or_incomplete_responses(self):
         for status, body in [(429, {}), (401, {}), (500, {}), (200, {}),

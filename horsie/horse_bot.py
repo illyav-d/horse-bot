@@ -47,24 +47,10 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.8.6"
+VERSION = "1.8.7"
 
 CHANGELOG = [
-    "Quick updates now post only new changelog entries if Horsie already posted a changelog within the last hour.",
-    "Ping Horsie to check your latest image or GIF for AI. No need to type 'is this real?' anymore.",
-    "Klipy animations now work too. Horsie checks a few frames, not the whole movie.",
-    "Image checks wait their turn when friends ask together. Cooldowns now explain the wait instead of giving you the silent treatment.",
-    "!horsearticle now reads live article pages and searches archives. More happy horse stories, fewer empty shelves.",
-    "Added Horse Nation stories and a Searching... message while Horsie reads. Shared stories stay remembered.",
-    "Carrots now survive bot updates. The snack treasury has a proper home.",
-    "Horsie read a book. More horse facts.",
-    "!horsearticle finds a happy horse story. If you've seen one already, Horsie digs up another.",
-    "Say macaroni horse. You know what happens.",
-    "Gave Horsie a few more things to say. He was repeating himself.",
-    "One race at a time per channel now. Four horses were enough chaos.",
-    "Fixed picks getting missed when everyone answered at once. You can change your pick until bets close.",
-    "!wow checks retail characters. !xivtrend checks FFXIV prices. Classic cards and raid recaps can wait.",
-    "Daily horses, changelogs and the Forever countdown now work across servers. Horsie has discovered sharing.",
+    "Horsie now describes what it sees in pictures and gives a fuller explanation of its AI verdict.",
 ]
 
 
