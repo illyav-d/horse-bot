@@ -72,9 +72,11 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 
 Mention Horsie with a message, for example `@Horsie how's your day?`, then use Discord's Reply on its answer to continue without another ping. Horsie responds only when invited, with short, friendly replies and occasional horse humor. Chat is available in server channels; DMs are ignored.
 
-Horsie remembers up to six exchanges per person and channel for 30 minutes after the last successful reply. Reply follow-ups only continue your own chat; mention Horsie to start a separate conversation. Memory is bounded to 128 conversations, stays in the bot's memory, and clears on restart. Chat sends your message and your own retained exchanges to Groq, without reading surrounding channel history or attachments. Horsie cannot browse or perform bot commands through chat.
+Horsie remembers up to six exchanges per person and channel for 30 minutes after the last successful reply. Reply follow-ups only continue your own chat; mention Horsie to start a separate conversation. Memory is bounded to 128 conversations, stays in the bot's memory, and clears on restart. Chat sends your message and your own retained exchanges to Groq, without reading surrounding channel history or attachments. Horsie can search and read public web pages when chat uses a supported web model. It cannot perform bot commands through chat.
 
-Chat uses the existing `GROQ_API_KEY`, with `qwen/qwen3.8-27b` by default (see [Groq's text chat documentation](https://console.groq.com/docs/text-chat)). Set `GROQ_CHAT_MODEL` to override it. Each person can have one request in progress and must wait five seconds after a successful reply before asking again. Up to three chat requests run at once, with a 30-second API timeout. Failed requests can be retried immediately unless Groq has imposed a quota pause; chat and image checks both consume the account's API quota.
+Chat uses the existing `GROQ_API_KEY`, with `qwen/qwen3.8-27b` by default (see [Groq's text chat documentation](https://console.groq.com/docs/text-chat)). Set `GROQ_CHAT_MODEL` to override it. Each person can have one request in progress and must wait five seconds after a successful reply before asking again. Up to three chat requests run at once, with a 55-second API timeout. Failed requests can be retried immediately unless Groq has imposed a quota pause; chat and image checks both consume the account's API quota.
+
+Web search is enabled automatically for `GROQ_CHAT_MODEL=openai/gpt-oss-20b` or `openai/gpt-oss-120b`. Production uses `openai/gpt-oss-20b` for chat; image checks still use their separate vision model. No additional API key is needed. Horsie chooses when to search, including requests such as `@Horsie search for the latest WoW news`, and links sources in its answer. Public page contents are treated as untrusted evidence. Groq runs the searches server-side through its [browser search tool](https://console.groq.com/docs/tool-use/built-in-tools/browser-search); searches can add latency and provider usage charges. Queries are derived from the conversation and sent to Groq's search provider. Set `GROQ_CHAT_WEB_SEARCH=false` to disable search, or use Qwen for text-only chat. Failed or inconclusive searches should be reported honestly.
 
 ## Image Reality Checks
 
@@ -194,7 +196,8 @@ The bot reads configuration from environment variables.
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
 | `GROQ_API_KEY` | For image checks and chat | Groq API key used for AI image checks and conversation |
-| `GROQ_CHAT_MODEL` | No | Text chat model; defaults to `qwen/qwen3.8-27b` |
+| `GROQ_CHAT_MODEL` | No | Defaults to Qwen; production uses `openai/gpt-oss-20b` for web-enabled chat |
+| `GROQ_CHAT_WEB_SEARCH` | No | Enables browser search on GPT-OSS 20B/120B; defaults to `true` |
 | `GROQ_REALITY_CHECK_MODEL` | No | Groq vision model; defaults to `qwen/qwen3.8-27b` |
 | `GROQ_REALITY_CHECK_REVIEW` | No | Set to `true` to enable an extra assessment for uncertain results; disabled by default to conserve quota |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |

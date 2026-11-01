@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from horsie.horse_chat import DEFAULT_MODEL, HorseChat, TTL, chat_completion
+from horsie.horse_chat import DEFAULT_MODEL, HorseChat, TTL, chat_completion, chat_payload, web_answer
 from horsie.message_routing import is_image_check
 from horsie.reality_check import CheckError, QuotaError, RealityCheck
 from tests.test_reality_check import message
@@ -127,6 +127,35 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatApiTests(unittest.IsolatedAsyncioTestCase):
+    def test_web_models_get_only_browser_tool_and_no_reasoning_output(self):
+        messages = [{"role": "system", "content": "You are Horsie."}, {"role": "user", "content": "latest news?"}]
+        with patch.dict(os.environ, {"GROQ_CHAT_WEB_SEARCH": "true"}):
+            for model in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
+                payload = chat_payload(messages, model)
+                self.assertEqual(payload["tools"], [{"type": "browser_search"}])
+                self.assertEqual(payload["tool_choice"], "auto")
+                self.assertFalse(payload["include_reasoning"])
+                self.assertEqual(payload["reasoning_effort"], "low")
+                self.assertIn("clickable", payload["messages"][0]["content"])
+        self.assertEqual(messages[0]["content"], "You are Horsie.")
+
+    def test_disabled_or_unsupported_search_has_honest_capability_prompt(self):
+        for model, enabled in [(DEFAULT_MODEL, "true"), ("openai/gpt-oss-20b", "false")]:
+            with patch.dict(os.environ, {"GROQ_CHAT_WEB_SEARCH": enabled}):
+                payload = chat_payload([], model)
+            self.assertNotIn("tools", payload)
+            self.assertIn("Web search is unavailable", payload["messages"][0]["content"])
+
+    def test_internal_citations_become_clickable_sources_from_actual_tools(self):
+        result = web_answer({"executed_tools": [
+            {"name": "browser.search", "search_results": {"results": [{"url": "https://example.com/other"}, {"url": "javascript:alert(1)"}]}},
+            {"name": "browser.open", "output": "L0: \nL1: URL: https://example.com/news\nL2: News"},
+        ]}, "Today's news【1†L2-L4】.")
+        self.assertIn("Today's news.", result)
+        self.assertIn("[Source 1](<https://example.com/news>)", result)
+        self.assertNotIn("javascript:", result)
+        self.assertEqual(web_answer({}, "Hello!"), "Hello!")
+
     async def test_default_and_blank_model_use_available_qwen_without_reasoning(self):
         for value in (None, "", "   "):
             response = NS(status=200, json=AsyncMock(return_value={"choices": [{"message": {"content": "Hello!"}}]}))
