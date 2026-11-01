@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import os
+import re
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -338,7 +339,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_review_uses_different_frames_and_can_resolve_uncertainty(self):
         first = self.assessment_body()
         review = self.assessment_body("Likely authentic", reasons="The clearer frames show consistent details.")
-        answer, _ = await self.call_api(responses=[first, review], mime="image/gif", data=gif_fixture(), review=True)
+        answer, _ = await self.call_api(responses=[first, review], mime="image/gif", data=gif_fixture(30), review=True)
         self.assertIn("Likely authentic", answer)
         self.assertEqual(len(self.last_requests), 2)
         contents = [call.kwargs["json"]["messages"][1]["content"] for call in self.last_requests]
@@ -389,10 +390,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base64.b64decode(inline.split(",", 1)[1]), b"image bytes")
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["reasoning_effort"], "none")
-        self.assertEqual(payload["max_completion_tokens"], 1280)
+        self.assertEqual(payload["max_completion_tokens"], 2048)
 
     async def test_complete_explanation_is_not_sliced_at_1000_characters(self):
-        reasons = "Visible details are ambiguous. " * 45 + "This is the final sentence."
+        reasons = "Visible details are ambiguous. " * 100 + "This is the final sentence."
         body = {"choices": [{"finish_reason": "stop", "message": {
             "content": json.dumps({"observations": ["Visible details are ambiguous."], "needs_review": False, "verdict": "Inconclusive", "reasons": reasons}),
         }}]}
@@ -428,9 +429,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(GIF_CAUTION, answer)
         parts = payload["messages"][1]["content"]
         images = [part["image_url"]["url"] for part in parts if part.get("type") == "image_url"]
-        self.assertEqual(len(images), 3)
+        self.assertEqual(len(images), 1)
         self.assertTrue(all(part.startswith("data:image/png;base64,") for part in images))
-        self.assertIn("frame 10 of 10", parts[-2]["text"])
+        self.assertIn("Frame 10/10", parts[-2]["text"])
+        self.assertIn("10 sampled frames of 10", parts[-2]["text"])
 
     async def test_animated_webp_submits_first_middle_last_frames(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
@@ -440,11 +442,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Animated WebP assessment uses sampled frames", answer)
         parts = payload["messages"][1]["content"]
         images = [p["image_url"]["url"] for p in parts if p.get("type") == "image_url"]
-        self.assertEqual(len(images), 3)
+        self.assertEqual(len(images), 1)
         self.assertTrue(all(url.startswith("data:image/png;base64,") for url in images))
-        labels = [p["text"] for p in parts if p.get("text", "").startswith("animated WebP")]
-        self.assertEqual([label.split(" of ")[0] for label in labels],
-                         ["animated WebP sampled frame 1", "animated WebP sampled frame 124", "animated WebP sampled frame 247"])
+        label = parts[-2]["text"]
+        self.assertIn("12 sampled frames of 247", label)
+        self.assertIn("Frame 1/247", label)
+        self.assertIn("Frame 247/247", label)
 
     async def test_static_webp_remains_a_single_image(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
@@ -472,7 +475,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 _, payload = await self.call_api(body=body, mime="image/gif", data=gif_fixture(),
                     images=[f"https://example.com/{i}.gif" for i in range(count)])
                 parts = payload["messages"][1]["content"]
-                self.assertEqual(sum(part.get("type") == "image_url" for part in parts), 3)
+                self.assertEqual(sum(part.get("type") == "image_url" for part in parts), count)
+                labels = [part["text"] for part in parts if "storyboard:" in part.get("text", "")]
+                self.assertEqual(len(labels), count)
+                self.assertTrue(all("Frame 1/10" in label and "Frame 10/10" in label for label in labels))
 
     async def test_groq_model_setting_ignores_old_provider_override(self):
         body = {"choices": [{"finish_reason": "stop", "message": {
@@ -501,6 +507,31 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GifTests(unittest.TestCase):
+    def test_storyboard_covers_end_of_long_animation_including_review(self):
+        data = gif_fixture(80, durations=[2000] + [10] * 79)
+        for alternate in (False, True):
+            with self.subTest(alternate=alternate):
+                parts = gif_parts(data, 12, alternate=alternate, storyboard=True)
+                label = parts[0]["text"]
+                self.assertIn("12 sampled frames of 80", label)
+                self.assertIn("Frame 1/80 - 0 ms", label)
+                self.assertIn("Frame 80/80 - 2780 ms", label)
+                self.assertEqual(len(set(re.findall(r"Frame (\d+)/", label))), 12)
+                encoded = parts[1]["image_url"]["url"].split(",", 1)[1]
+                with Image.open(io.BytesIO(base64.b64decode(encoded))) as sheet, Image.open(io.BytesIO(data)) as source:
+                    source.seek(0)
+                    self.assertEqual(sheet.getpixel((0, 28)), source.convert("RGB").getpixel((0, 0)))
+                    source.seek(79)
+                    self.assertEqual(sheet.getpixel((3 * 320, 2 * 48 + 28)), source.convert("RGB").getpixel((0, 0)))
+
+    def test_short_storyboard_shows_every_frame_even_on_review(self):
+        for count in (1, 4, 10):
+            for alternate in (False, True):
+                with self.subTest(count=count, alternate=alternate):
+                    parts = gif_parts(gif_fixture(count), 12, alternate=alternate, storyboard=True)
+                    numbers = [int(n) for n in re.findall(r"Frame (\d+)/", parts[0]["text"])]
+                    self.assertEqual(numbers, list(range(1, count + 1)))
+
     def test_playback_time_sampling_handles_a_long_held_frame(self):
         parts = gif_parts(gif_fixture(10, durations=[900] + [10] * 9))
         labels = [part["text"] for part in parts if "text" in part]

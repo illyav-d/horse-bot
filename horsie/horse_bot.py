@@ -47,10 +47,10 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.8.7"
+VERSION = "1.8.8"
 
 CHANGELOG = [
-    "Horsie now describes what it sees in pictures and gives a fuller explanation of its AI verdict.",
+    "Full-GIF sampling and longer picture explanations.",
 ]
 
 
