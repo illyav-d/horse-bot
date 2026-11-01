@@ -74,7 +74,7 @@ Mention Horsie with a message, for example `@Horsie how's your day?`, then use D
 
 Horsie remembers up to six exchanges per person and channel for 30 minutes after the last successful reply. Reply follow-ups only continue your own chat; mention Horsie to start a separate conversation. Memory is bounded to 128 conversations, stays in the bot's memory, and clears on restart. Chat sends your message and your own retained exchanges to Groq, without reading surrounding channel history or attachments. Horsie cannot browse or perform bot commands through chat.
 
-Chat uses the existing `GROQ_API_KEY`, with `llama-3.3-70b-versatile` by default (see [Groq's text chat documentation](https://console.groq.com/docs/text-chat)). Set `GROQ_CHAT_MODEL` to override it. Each person can have one request in progress and must wait five seconds after a successful reply before asking again. Up to three chat requests run at once, with a 30-second API timeout. Failed requests can be retried immediately unless Groq has imposed a quota pause; chat and image checks both consume the account's API quota.
+Chat uses the existing `GROQ_API_KEY`, with `qwen/qwen3.8-27b` by default (see [Groq's text chat documentation](https://console.groq.com/docs/text-chat)). Set `GROQ_CHAT_MODEL` to override it. Each person can have one request in progress and must wait five seconds after a successful reply before asking again. Up to three chat requests run at once, with a 30-second API timeout. Failed requests can be retried immediately unless Groq has imposed a quota pause; chat and image checks both consume the account's API quota.
 
 ## Image Reality Checks
 
@@ -194,7 +194,7 @@ The bot reads configuration from environment variables.
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
 | `GROQ_API_KEY` | For image checks and chat | Groq API key used for AI image checks and conversation |
-| `GROQ_CHAT_MODEL` | No | Text chat model; defaults to `llama-3.3-70b-versatile` |
+| `GROQ_CHAT_MODEL` | No | Text chat model; defaults to `qwen/qwen3.8-27b` |
 | `GROQ_REALITY_CHECK_MODEL` | No | Groq vision model; defaults to `qwen/qwen3.8-27b` |
 | `GROQ_REALITY_CHECK_REVIEW` | No | Set to `true` to enable an extra assessment for uncertain results; disabled by default to conserve quota |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |

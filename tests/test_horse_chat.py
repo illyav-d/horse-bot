@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from horsie.horse_chat import HorseChat, TTL, chat_completion
+from horsie.horse_chat import DEFAULT_MODEL, HorseChat, TTL, chat_completion
 from horsie.message_routing import is_image_check
 from horsie.reality_check import CheckError, QuotaError, RealityCheck
 from tests.test_reality_check import message
@@ -127,6 +127,26 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_and_blank_model_use_available_qwen_without_reasoning(self):
+        for value in (None, "", "   "):
+            response = NS(status=200, json=AsyncMock(return_value={"choices": [{"message": {"content": "Hello!"}}]}))
+            request = MagicMock()
+            request.__aenter__ = AsyncMock(return_value=response)
+            request.__aexit__ = AsyncMock(return_value=False)
+            session = MagicMock()
+            session.post.return_value = request
+            client = MagicMock()
+            client.__aenter__ = AsyncMock(return_value=session)
+            client.__aexit__ = AsyncMock(return_value=False)
+            env = {"GROQ_API_KEY": "test-key"}
+            if value is not None:
+                env["GROQ_CHAT_MODEL"] = value
+            with patch.dict(os.environ, env, clear=True), patch("horsie.horse_chat.aiohttp.ClientSession", return_value=client):
+                await chat_completion([{"role": "user", "content": "hello"}])
+            payload = session.post.call_args.kwargs["json"]
+            self.assertEqual(payload["model"], DEFAULT_MODEL)
+            self.assertEqual(payload["reasoning_effort"], "none")
+
     async def call_api(self, status, body, headers=None):
         response = NS(status=status, json=AsyncMock(return_value=body), headers=headers or {})
         request = MagicMock()
