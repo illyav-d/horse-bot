@@ -48,10 +48,10 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.8.9"
+VERSION = "1.8.10"
 
 CHANGELOG = [
-    "Mention or reply to chat with Horsie; web search is disabled.",
+    "Horsie now follows the whole channel with shared conversation memory.",
 ]
 
 

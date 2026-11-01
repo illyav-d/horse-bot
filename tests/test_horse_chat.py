@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import unittest
 from types import SimpleNamespace as NS
@@ -41,48 +42,79 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(target.await_count, int(image_check))
                 msg.reply.assert_awaited_once()
 
-    async def test_reply_continues_own_conversation_only(self):
+    async def test_shared_channel_context_and_replies_from_any_person(self):
         with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="Hello!")) as api:
-            first = self.request()
-            await self.cog.on_message(first)
-            self.cog.last_success.clear()
-            followup = self.request("tell me more", id=101)
-            followup.reference = NS(message_id=1100)
-            await self.cog.on_message(followup)
+            background = self.request("we are racing tonight", id=90)
+            background.author.display_name = "Alice"
+            await self.cog.on_message(background)
+            api.assert_not_awaited()
+            await self.cog.on_message(self.request())
             payload = api.await_args.args[0]
-            self.assertEqual([item["role"] for item in payload], ["system", "user", "assistant", "user"])
-            other = self.request("tell me too")
+            self.assertIn("we are racing tonight", payload[1]["content"])
+            self.assertEqual(json.loads(payload[1]["content"])["speaker"], "Alice")
+            other = self.request("tell me too", id=101)
             other.author.id = 8
             other.reference = NS(message_id=1100)
             await self.cog.on_message(other)
-            other.reply.assert_not_awaited()
-            other.content = "<@42> hello too"
-            await self.cog.on_message(other)
-            self.assertEqual(len(api.await_args.args[0]), 2)
-            other.channel.id = 21
-            await self.cog.on_message(other)
-            # User cooldown also applies when switching channels.
-            self.assertEqual(api.await_count, 3)
-            self.cog.last_success.clear()
-            await self.cog.on_message(other)
-            self.assertEqual(len(api.await_args.args[0]), 2)
-            self.assertFalse(first.reply.await_args.kwargs["allowed_mentions"].everyone)
+            payload = api.await_args.args[0]
+            self.assertEqual(api.await_count, 2)
+            self.assertEqual(json.loads(payload[-1]["content"])["user_id"], "8")
+            self.assertIn("we are racing tonight", str(payload))
+            for field in ("channel", "guild"):
+                fresh = self.request()
+                fresh.author.id = 9
+                getattr(fresh, field).id += 1
+                self.cog.last_success.clear()
+                await self.cog.on_message(fresh)
+                self.assertEqual(len(api.await_args.args[0]), 2)
 
     async def test_expiry_and_bounded_history(self):
         with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="hello")) as api:
-            for number in range(9):
-                self.cog.last_success.clear()
-                await self.cog.on_message(self.request(id=number))
-            state = self.cog.sessions[(1, 20, 7)]
-            self.assertEqual(len(state["messages"]), 12)
-            state["updated"] -= TTL + 1
-            old_reply = self.request("more")
-            old_reply.reference = NS(message_id=1008)
-            await self.cog.on_message(old_reply)
-            old_reply.reply.assert_not_awaited()
-            self.cog.last_success.clear()
+            for number in range(60):
+                await self.cog.on_message(self.request("background " + str(number), id=number))
+            state = self.cog.sessions[(1, 20)]
+            self.assertEqual(len(state["messages"]), 40)
+            for entry in state["messages"]:
+                entry["at"] -= TTL + 1
             await self.cog.on_message(self.request())
             self.assertEqual(len(api.await_args.args[0]), 2)
+            # Expire individual messages even in an otherwise active channel.
+            state = self.cog.sessions[(1, 20)]
+            state["messages"][0]["at"] -= TTL + 1
+            self.cog.prune(asyncio.get_running_loop().time())
+            self.assertEqual(len(state["messages"]), 1)
+
+    async def test_passive_messages_arriving_during_reply_are_preserved(self):
+        started, finish = asyncio.Event(), asyncio.Event()
+        async def delayed(messages):
+            started.set()
+            await finish.wait()
+            return "hello"
+        with patch("horsie.horse_chat.chat_completion", side_effect=delayed):
+            task = asyncio.create_task(self.cog.on_message(self.request()))
+            await started.wait()
+            passive = self.request("new topic while you think", id=102)
+            passive.author.id = 8
+            await self.cog.on_message(passive)
+            second = self.request("<@42> me too", id=103)
+            second.author.id = 9
+            await self.cog.on_message(second)
+            self.assertIn("still answering", second.reply.await_args.args[0])
+            finish.set()
+            await task
+        self.assertIn("new topic while you think", str(self.cog.sessions[(1, 20)]))
+        self.assertFalse(self.cog.active_users)
+
+    async def test_context_size_channel_limit_and_ignored_authors(self):
+        for number in range(30):
+            await self.cog.on_message(self.request("x" * 4000, id=number))
+        state = self.cog.sessions[(1, 20)]
+        self.assertLessEqual(sum(len(entry["payload"]["content"]) for entry in state["messages"]), 24000)
+        for number in range(140):
+            msg = self.request("background")
+            msg.channel.id = 100 + number
+            await self.cog.on_message(msg)
+        self.assertEqual(len(self.cog.sessions), 128)
 
     async def test_ignores_bots_dms_webhooks_and_uninvited_messages(self):
         cases = [self.request("hello"), self.request("<@99> hello")]
@@ -101,7 +133,7 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
             with patch("horsie.horse_chat.chat_completion", AsyncMock(side_effect=error)):
                 await self.cog.on_message(self.request())
             self.assertFalse(self.cog.active)
-            self.assertFalse(self.cog.sessions)
+            self.assertTrue(self.cog.sessions)  # Channel messages survive failed AI calls.
             self.assertFalse(self.cog.last_success)
         with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="hello")) as api:
             await self.cog.on_message(self.request())
@@ -119,9 +151,9 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         with patch("horsie.horse_chat.chat_completion", AsyncMock()) as api:
             with patch.dict(os.environ, {"GROQ_API_KEY": ""}):
                 await self.cog.on_message(self.request())
-            self.cog.active.add((1, 20, 7))
+            self.cog.active.add((1, 20))
             await self.cog.on_message(self.request())
-            self.cog.active = {(1, 20, i) for i in range(10, 13)}
+            self.cog.active = {(1, i) for i in range(10, 13)}
             await self.cog.on_message(self.request())
             api.assert_not_awaited()
 
