@@ -60,7 +60,7 @@ class RealityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mention_variants_find_image_past_intervening_chat(self):
         for text in ["<@42> is this real?", "is it real <@!42>", "<@42> real or AI?",
-                     "<@42> is that AI?", "<@42> if its real", "<@42>", "<@!42>", "<@42> hello"]:
+                     "<@42> is that AI?", "<@42> if its real", "<@42>", "<@!42>"]:
             with self.subTest(text=text):
                 cog = RealityCheck(NS(user=NS(id=42)))
                 request, image = message(text), photo()

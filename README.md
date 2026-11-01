@@ -65,11 +65,20 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 | `!xivtrend <world/DC> <item> [--hq or --nq]` | Compares recent sale prices and current listings; defaults to NQ |
 | `macaroni horse` (no prefix) | Posts the kitchen horse photo |
 | `!horsearticle` | Finds the latest suitable light horse story |
-| `@Horsie` | Assesses your latest image or GIF in this channel for possible AI generation |
+| `@Horsie` or `@Horsie is this real?` | Assesses your latest image or GIF in this channel for possible AI generation |
+| `@Horsie <message>` | Chats with Horsie; reply to its chat messages to continue |
+
+## Chat with Horsie
+
+Mention Horsie with a message, for example `@Horsie how's your day?`, then use Discord's Reply on its answer to continue without another ping. Horsie responds only when invited, with short, friendly replies and occasional horse humor. Chat is available in server channels; DMs are ignored.
+
+Horsie remembers up to six exchanges per person and channel for 30 minutes after the last successful reply. Reply follow-ups only continue your own chat; mention Horsie to start a separate conversation. Memory is bounded to 128 conversations, stays in the bot's memory, and clears on restart. Chat sends your message and your own retained exchanges to Groq, without reading surrounding channel history or attachments. Horsie cannot browse or perform bot commands through chat.
+
+Chat uses the existing `GROQ_API_KEY`, with `llama-3.3-70b-versatile` by default (see [Groq's text chat documentation](https://console.groq.com/docs/text-chat)). Set `GROQ_CHAT_MODEL` to override it. Each person can have one request in progress and must wait five seconds after a successful reply before asking again. Up to three chat requests run at once, with a 30-second API timeout. Failed requests can be retried immediately unless Groq has imposed a quota pause; chat and image checks both consume the account's API quota.
 
 ## Image Reality Checks
 
-Post or link an image or GIF, then ping `@Horsie` (select the actual bot mention in Discord). Any direct mention starts a check; no question text is required. Existing questions such as `@Horsie is this real?` still work. An image or link in the question takes priority. Otherwise, Horsie checks only the asking user's five previous messages in that channel, newest first, stopping at the first image or GIF. Other people's messages do not count toward those five and their images are never selected, including when replying to another person. If none of your five messages has readable media, Horsie says so. Each request selects its own media; it never reuses the last person's image. The answer links the checked message.
+Post or link an image or GIF, then ping `@Horsie` (select the actual bot mention in Discord). A bare mention or an image-check question such as `@Horsie is this real?`, `is it real?`, or `real or AI?` starts a check. Other text with a mention starts a chat instead. An image or link in the check question takes priority. Otherwise, Horsie checks only the asking user's five previous messages in that channel, newest first, stopping at the first image or GIF. Other people's messages do not count toward those five and their images are never selected, including when replying to another person. If none of your five messages has readable media, Horsie says so. Each request selects its own media; it never reuses the last person's image. The answer links the checked message.
 
 Uploads, direct HTTPS image/GIF links (including Markdown links), extensionless image URLs, and Discord image/GIF previews are recognized. When Discord has not created a preview, Horsie can open a linked page and read its Open Graph/Twitter image metadata, including image-sharing pages such as Tenor and Giphy. It tries at most three page links per message, reads up to 256 KB of each page, validates public HTTPS destinations and redirects, and caps the entire message/link lookup at 15 seconds. Pages requiring login or lacking readable image metadata may still need a direct image link.
 
@@ -184,7 +193,8 @@ The bot reads configuration from environment variables.
 | Variable | Required | Description |
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
-| `GROQ_API_KEY` | For image checks | Groq API key used when someone mentions Horsie for an image reality check |
+| `GROQ_API_KEY` | For image checks and chat | Groq API key used for AI image checks and conversation |
+| `GROQ_CHAT_MODEL` | No | Text chat model; defaults to `llama-3.3-70b-versatile` |
 | `GROQ_REALITY_CHECK_MODEL` | No | Groq vision model; defaults to `qwen/qwen3.8-27b` |
 | `GROQ_REALITY_CHECK_REVIEW` | No | Set to `true` to enable an extra assessment for uncertain results; disabled by default to conserve quota |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |

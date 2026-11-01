@@ -18,6 +18,7 @@ import aiohttp
 import discord
 from PIL import Image, ImageDraw, UnidentifiedImageError
 from discord.ext import commands
+from horsie.message_routing import is_image_check
 
 
 IMAGE_LINK = re.compile(r"https?://[^\s<>]+", re.I)
@@ -691,7 +692,7 @@ class RealityCheck(commands.Cog):
     async def on_message(self, message):
         if message.author.bot or message.webhook_id or message.guild is None:
             return
-        if self.bot.user is None or not re.search(rf"<@!?{self.bot.user.id}>", message.content):
+        if self.bot.user is None or not is_image_check(message.content, self.bot.user.id):
             return
         bucket = self.cooldowns.get_bucket(message)
         retry_after = bucket.get_retry_after()
