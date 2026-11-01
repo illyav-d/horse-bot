@@ -48,10 +48,10 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.8.8"
+VERSION = "1.8.9"
 
 CHANGELOG = [
-    "Full-GIF sampling and longer picture explanations.",
+    "Mention or reply to chat with Horsie; web search is disabled.",
 ]
 
 
