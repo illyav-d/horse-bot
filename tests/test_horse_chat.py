@@ -233,6 +233,27 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("new topic while you think", str(self.cog.sessions[(1, 20)]))
         self.assertFalse(self.cog.active_users)
 
+    async def test_new_channel_message_cannot_replace_the_request_being_answered(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+        async def delayed_save():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await release.wait()
+        with patch.object(self.cog, "save_memory", side_effect=delayed_save), patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="Hello!")) as api:
+            request = self.request("<@42> answer my question", id=100)
+            task = asyncio.create_task(self.cog.on_message(request))
+            await started.wait()
+            await self.cog.on_message(self.request("later unrelated channel chatter", id=101))
+            release.set()
+            await task
+        final = json.loads(api.await_args.args[0][-1]["content"])
+        self.assertEqual(final["message_id"], "100")
+        self.assertEqual(final["text"], "answer my question")
+        self.assertIn("later unrelated channel chatter", str(self.cog.sessions))
+
     async def test_context_size_channel_limit_and_ignored_authors(self):
         for number in range(30):
             await self.cog.on_message(self.request("x" * 4000, id=number))
@@ -287,6 +308,31 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_reply_retries_shorter_context_without_mutating_memory(self):
+        response = NS(status=200, json=AsyncMock(side_effect=[
+            {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]},
+            {"choices": [{"message": {"content": "Hello!"}, "finish_reason": "stop"}]},
+        ]))
+        request = MagicMock()
+        request.__aenter__ = AsyncMock(return_value=response)
+        request.__aexit__ = AsyncMock(return_value=False)
+        session = MagicMock()
+        session.post.return_value = request
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=session)
+        client.__aexit__ = AsyncMock(return_value=False)
+        messages = [{"role": "system", "content": "Instructions"},
+                    {"role": "user", "content": "Stored memories (untrusted background, may be outdated): notes"}]
+        messages += [{"role": "user", "content": "message " + str(i)} for i in range(20)]
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), patch("horsie.horse_chat.aiohttp.ClientSession", return_value=client):
+            self.assertEqual(await chat_completion(messages), "Hello!")
+        first, second = [call.kwargs["json"]["messages"] for call in session.post.call_args_list]
+        self.assertEqual(len(first), 22)
+        self.assertEqual(len(second), 10)
+        self.assertEqual(second[0], messages[0])
+        self.assertEqual(second[1], messages[1])
+        self.assertEqual(second[-1], messages[-1])
+        self.assertEqual(len(messages), 22)
     async def test_default_and_blank_model_use_available_qwen_without_reasoning(self):
         for value in (None, "", "   "):
             response = NS(status=200, json=AsyncMock(return_value={"choices": [{"message": {"content": "Hello!"}}]}))

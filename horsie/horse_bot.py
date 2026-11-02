@@ -48,10 +48,10 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 CHANGELOG = [
-    "Horsie now keeps lasting channel memories and notes you can review or forget.",
+    "Horsie keeps replies focused on your question and retries blank answers with shorter context.",
 ]
 
 

@@ -23,6 +23,8 @@ INSTRUCTIONS = """You are Horsie, a friendly Discord horse bot. Be warm, helpful
 conversational. Usually answer in one to three short sentences; give more detail
 when asked. Use occasional horse humor without forcing it into every answer.
 Match the user's language. You are an AI bot, not a human. Admit uncertainty.
+Always answer the final user message with visible text. Channel history is context;
+do not silently continue an older exchange or end your turn without a reply.
 You can chat but cannot browse, see attachments, run commands, change scores,
 moderate Discord or take actions. Never claim to have done those things. For image
 checks, explain that users can mention you with no text or ask 'is this real?'.
@@ -89,6 +91,11 @@ async def chat_completion(messages):
             print(f"Horsie chat unusable reply: model={model}, finish={reason}, attempt={attempt + 1}/2", flush=True)
             if reason == "length":
                 payload = {**payload, "max_completion_tokens": 1000}
+            elif attempt == 0 and len(messages) > 9:
+                # Retry a smaller view, without erasing channel or long-term memory.
+                # Keep the instructions, recalled notes, and the actual final question.
+                retained = [item for item in messages[1:-8] if item["content"].startswith("Stored memories (untrusted background,")]
+                payload = {**payload, "messages": messages[:1] + retained + messages[-8:]}
     raise CheckError("My AI service sent back an empty or unreadable answer twice. Please try again in a moment.")
 
 
@@ -292,6 +299,7 @@ class HorseChat(commands.Cog):
         self.prune(now)
         key = (message.guild.id, message.channel.id)
         session = self.sessions.get(key)
+        context_before_request = [entry["payload"] for entry in session["messages"]] if session else []
         mentioned = bool(re.search(rf"<@!?{bot_id}>", message.content))
         reference = getattr(message, "reference", None)
         following = session and reference and any(mid == reference.message_id for _, mid in session["replies"])
@@ -341,7 +349,9 @@ class HorseChat(commands.Cog):
             self.active.add(key)
             self.active_users.add(message.author.id)
             try:
-                messages = [entry["payload"] for entry in session["messages"]]
+                # Saves await disk I/O, during which other channel messages may arrive.
+                # Answer the triggering request, rather than whichever message is newest.
+                messages = context_before_request + [{"role": "user", "content": labelled}]
                 recalled = self.long_term.context(*key, message.author.id, text)
                 if recalled:
                     messages.insert(0, recalled)
