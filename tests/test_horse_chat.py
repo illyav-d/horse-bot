@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import tempfile
+import threading
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,15 +11,18 @@ from horsie.horse_chat import DEFAULT_MODEL, HorseChat, TTL, chat_completion
 from horsie.message_routing import is_image_check
 from horsie.reality_check import CheckError, QuotaError, RealityCheck
 from tests.test_reality_check import message
+from horsie.data_storage import write_json
 
 
 class ChatTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.bot = NS(user=NS(id=42))
-        self.cog = HorseChat(self.bot)
-        self.env = patch.dict(os.environ, {"GROQ_API_KEY": "test-key"})
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.env = patch.dict(os.environ, {"GROQ_API_KEY": "test-key", "HORSE_CHAT_MEMORY_FILE": os.path.join(self.directory.name, "memory.json")})
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.bot = NS(user=NS(id=42))
+        self.cog = HorseChat(self.bot)
 
     def request(self, content="<@42> hello", id=100):
         msg = message(content, id=id)
@@ -67,6 +72,58 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
                 self.cog.last_success.clear()
                 await self.cog.on_message(fresh)
                 self.assertEqual(len(api.await_args.args[0]), 2)
+
+    async def test_reboot_restores_context_and_reply_followups(self):
+        with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="Hello!")) as api:
+            await self.cog.on_message(self.request("racing tonight", id=90))
+            await self.cog.on_message(self.request())
+            restarted = HorseChat(self.bot)
+            followup = self.request("who is racing?", id=101)
+            followup.author.id = 8
+            followup.reference = NS(message_id=1100)
+            await restarted.on_message(followup)
+            self.assertIn("racing tonight", str(api.await_args.args[0]))
+            self.assertIn("Hello!", str(api.await_args.args[0]))
+            self.assertEqual(api.await_count, 2)
+
+    async def test_save_failure_keeps_live_memory_and_retries_later(self):
+        with patch("horsie.horse_chat.write_json", side_effect=OSError("disk unavailable")):
+            await self.cog.on_message(self.request("background"))
+        self.assertTrue(self.cog.sessions)
+        self.assertNotEqual(self.cog.saved_revision, self.cog.memory_revision)
+        await self.cog.save_memory()
+        restarted = HorseChat(self.bot)
+        self.assertIn("background", str(restarted.sessions))
+
+    async def test_cancelled_save_finishes_before_newer_snapshot(self):
+        started, release = threading.Event(), threading.Event()
+        count = 0
+        def slow_write(path, snapshot):
+            nonlocal count
+            count += 1
+            if count == 1:
+                started.set()
+                if not release.wait(5):
+                    raise RuntimeError("test writer timed out")
+            write_json(path, snapshot)
+        now = asyncio.get_running_loop().time()
+        self.cog.remember((1, 20), now, "user", "first")
+        with patch("horsie.horse_chat.write_json", side_effect=slow_write):
+            saving = asyncio.create_task(self.cog.save_memory())
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait, 5))
+                saving.cancel()
+                self.cog.remember((1, 20), now, "user", "second")
+                newer = asyncio.create_task(self.cog.save_memory())
+                await asyncio.sleep(0)
+                self.assertFalse(newer.done())
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await saving
+            await newer
+        restored = HorseChat(self.bot)
+        self.assertEqual([entry["payload"]["content"] for entry in restored.sessions[(1, 20)]["messages"]], ["first", "second"])
 
     async def test_expiry_and_bounded_history(self):
         with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="hello")) as api:

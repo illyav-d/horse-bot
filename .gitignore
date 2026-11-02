@@ -7,6 +7,7 @@ __pycache__/
 *.log
 carrots.json
 horse_articles.json
+horse_chat_memory.json
 discord_login_state.json
 scripts/StartHorseBot.ps1
 data/*

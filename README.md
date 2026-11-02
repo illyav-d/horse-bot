@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.8.11**
+Current version: **1.8.12**
 
 ## Project Layout
 
@@ -38,6 +38,10 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 - Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
 - On-demand light horse articles
 - Ping Horsie to assess your latest image or GIF for signs of AI generation
+
+## Version 1.8.12
+
+- Horsie now remembers recent channel conversations after a reboot.
 
 ## Version 1.8.11
 
@@ -86,7 +90,7 @@ Mention Horsie with a message, for example `@Horsie how's your day?`, then use D
 
 Horsie follows new human text messages throughout the channel, including messages without a ping, using one shared conversation for everyone. Anyone can reply to Horsie's chat answers to continue. Messages are labelled with their speaker's display name, user ID, message ID and replied-to message ID so Horsie can follow who said what. It still only answers when mentioned or replied to; ordinary messages do not trigger AI calls. Bots, webhooks and DMs are ignored.
 
-Memory holds up to 40 messages (human messages and Horsie's chat answers), at most 24,000 text characters per channel. Each message expires after 30 minutes. Up to 128 channel memories are retained, with older channels evicted first. Memory starts with messages received after startup, stays in RAM, and clears on restart; it does not backfill channel history. Channels, threads and servers have separate memories. When asked to respond, Horsie sends this recent shared channel context to Groq. Attachments are not read for chat. Horsie cannot browse or perform bot commands through chat.
+Memory holds up to 40 messages (human messages and Horsie's chat answers), at most 24,000 text characters per channel. Each message expires after 30 minutes, including time spent offline. Up to 128 channel memories are retained, with older channels evicted first. Channel text, speaker labels and reply IDs are saved atomically after each message in `horse_chat_memory.json` on the Railway volume (locally, `data/horse_chat_memory.json`). Set `HORSE_CHAT_MEMORY_FILE` to override the path. Recent context and reply follow-ups reload after a restart; expired messages are discarded on load and cleaned from storage every minute while running. It does not backfill Discord history. Channels, threads and servers have separate memories. When asked to respond, Horsie sends this recent shared channel context to Groq. Attachments are not read for chat. Horsie cannot browse or perform bot commands through chat.
 
 Chat uses the existing `GROQ_API_KEY`, with `qwen/qwen3.8-27b` by default (see [Groq's text chat documentation](https://console.groq.com/docs/text-chat)). Set `GROQ_CHAT_MODEL` to override it. Each channel and person can have one request in progress, and each person must wait five seconds after a successful reply before asking again. Up to three chat requests run at once, with a 30-second API timeout. Failed requests can be retried immediately unless Groq has imposed a quota pause; chat and image checks both consume the account's API quota.
 
@@ -209,6 +213,7 @@ The bot reads configuration from environment variables.
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
 | `GROQ_API_KEY` | For image checks and chat | Groq API key used for AI image checks and conversation |
 | `GROQ_CHAT_MODEL` | No | Text chat model; defaults to `qwen/qwen3.8-27b` |
+| `HORSE_CHAT_MEMORY_FILE` | No | Persistent channel memory path; defaults to `horse_chat_memory.json` on the Railway volume, or `data/horse_chat_memory.json` locally |
 | `GROQ_REALITY_CHECK_MODEL` | No | Groq vision model; defaults to `qwen/qwen3.8-27b` |
 | `GROQ_REALITY_CHECK_REVIEW` | No | Set to `true` to enable an extra assessment for uncertain results; disabled by default to conserve quota |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |

@@ -48,10 +48,10 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.8.11"
+VERSION = "1.8.12"
 
 CHANGELOG = [
-    "Horsie automatically retries empty AI replies before asking you to try again.",
+    "Horsie now remembers recent channel conversations after a reboot.",
 ]
 
 

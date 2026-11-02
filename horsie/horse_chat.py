@@ -5,14 +5,17 @@ import json
 import math
 import os
 import re
+import time
 from collections import OrderedDict
 
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from horsie.message_routing import is_image_check, mention_text
 from horsie.reality_check import CheckError, QuotaError, groq_error, reply_parts
+from horsie.chat_memory import load_memory, memory_snapshot
+from horsie.data_storage import data_path, write_json
 
 
 INSTRUCTIONS = """You are Horsie, a friendly Discord horse bot. Be warm, helpful and
@@ -87,16 +90,57 @@ async def chat_completion(messages):
 class HorseChat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.sessions = OrderedDict()
+        self.memory_path = data_path("HORSE_CHAT_MEMORY_FILE", "horse_chat_memory.json")
+        self.sessions = load_memory(self.memory_path, time.monotonic(), time.time(), TTL,
+                                    MAX_SESSIONS, MAX_MESSAGES, MAX_CONTEXT_CHARS)
+        self.memory_lock = asyncio.Lock()
+        self.memory_revision = 1
+        self.saved_revision = 0
         self.active = set()
         self.active_users = set()
         self.last_success = OrderedDict()
         self.blocked_until = 0
 
+    async def cog_load(self):
+        print(f"Horsie chat memory loaded: channels={len(self.sessions)}, file={self.memory_path}", flush=True)
+        self.memory_cleanup.start()
+
+    async def cog_unload(self):
+        self.memory_cleanup.cancel()
+        await self.save_memory()
+
+    @tasks.loop(seconds=60)
+    async def memory_cleanup(self):
+        self.prune(time.monotonic())
+        await self.save_memory()
+
+    async def save_memory(self):
+        async with self.memory_lock:
+            if self.saved_revision == self.memory_revision:
+                return
+            revision = self.memory_revision
+            snapshot = memory_snapshot(self.sessions, time.monotonic(), time.time())
+            try:
+                writer = asyncio.create_task(asyncio.to_thread(write_json, self.memory_path, snapshot))
+                try:
+                    await asyncio.shield(writer)
+                except asyncio.CancelledError:
+                    # A thread cannot be cancelled. Keep the lock until its atomic
+                    # write finishes so a newer snapshot cannot be overwritten.
+                    await writer
+                    self.saved_revision = revision
+                    raise
+                self.saved_revision = revision
+            except OSError as error:
+                print(f"Horsie chat memory could not save: {type(error).__name__}", flush=True)
+
     def prune(self, now):
         for key, session in list(self.sessions.items()):
+            before = (len(session["messages"]), len(session["replies"]))
             session["messages"] = [entry for entry in session["messages"] if now - entry["at"] < TTL]
             session["replies"] = [(at, mid) for at, mid in session["replies"] if now - at < TTL]
+            if before != (len(session["messages"]), len(session["replies"])):
+                self.memory_revision += 1
             if not session["messages"]:
                 del self.sessions[key]
         for user, sent in list(self.last_success.items()):
@@ -104,6 +148,7 @@ class HorseChat(commands.Cog):
                 del self.last_success[user]
 
     def remember(self, key, now, role, content, reply_id=None):
+        self.memory_revision += 1
         session = self.sessions.setdefault(key, {"messages": [], "replies": []})
         session["messages"].append({"at": now, "payload": {"role": role, "content": content[:MAX_CONTEXT_CHARS]}})
         session["messages"] = session["messages"][-MAX_MESSAGES:]
@@ -140,6 +185,7 @@ class HorseChat(commands.Cog):
                 "text": text[:4000],
             }, ensure_ascii=False)
             session = self.remember(key, now, "user", labelled)
+        await self.save_memory()
         if is_image_check(message.content, bot_id):
             return
         if not mentioned and not following:
@@ -176,6 +222,7 @@ class HorseChat(commands.Cog):
                 for part in reply_parts(answer):
                     sent = await self.send(message, part)
                     self.remember(key, asyncio.get_running_loop().time(), "assistant", part, sent.id)
+                    await self.save_memory()
                 finished = asyncio.get_running_loop().time()
                 self.last_success[message.author.id] = finished
             finally:
