@@ -179,8 +179,10 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["model"], DEFAULT_MODEL)
             self.assertEqual(payload["reasoning_effort"], "none")
 
-    async def call_api(self, status, body, headers=None):
+    async def call_api(self, status, body, headers=None, responses=None):
         response = NS(status=status, json=AsyncMock(return_value=body), headers=headers or {})
+        if responses is not None:
+            response.json.side_effect = responses
         request = MagicMock()
         request.__aenter__ = AsyncMock(return_value=response)
         request.__aexit__ = AsyncMock(return_value=False)
@@ -190,8 +192,35 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
         client.__aenter__ = AsyncMock(return_value=session)
         client.__aexit__ = AsyncMock(return_value=False)
         with patch.dict(os.environ, {"GROQ_API_KEY": "test-key", "GROQ_CHAT_MODEL": "chosen-model"}), patch("horsie.horse_chat.aiohttp.ClientSession", return_value=client):
-            answer = await chat_completion([{"role": "user", "content": "hello"}])
+            try:
+                answer = await chat_completion([{"role": "user", "content": "hello"}])
+            finally:
+                self.requests = session.post.call_args_list
         return answer, session.post.call_args.kwargs
+
+    async def test_empty_reply_retries_once_and_preserves_context(self):
+        good = {"choices": [{"message": {"content": "Hello!"}, "finish_reason": "stop"}]}
+        for content in (None, "", "   "):
+            empty = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+            answer, _ = await self.call_api(200, {}, responses=[empty, good])
+            self.assertEqual(answer, "Hello!")
+            self.assertEqual(len(self.requests), 2)
+            self.assertEqual(self.requests[0].kwargs["json"]["messages"], self.requests[1].kwargs["json"]["messages"])
+
+    async def test_empty_length_reply_gets_more_output_budget(self):
+        empty = {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}
+        good = {"choices": [{"message": {"content": "Hello!"}}]}
+        await self.call_api(200, {}, responses=[empty, good])
+        self.assertEqual([request.kwargs["json"]["max_completion_tokens"] for request in self.requests], [500, 1000])
+
+    async def test_empty_replies_stop_after_two_attempts_without_logging_text(self):
+        with patch("builtins.print") as log:
+            with self.assertRaisesRegex(CheckError, "twice"):
+                await self.call_api(200, {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]})
+        self.assertEqual(len(self.requests), 2)
+        self.assertIn("finish=stop", str(log.call_args_list))
+        self.assertNotIn("test-key", str(log.call_args_list))
+        self.assertNotIn("hello", str(log.call_args_list))
 
     async def test_payload_and_plain_text_response(self):
         answer, kwargs = await self.call_api(200, {"choices": [{"message": {"content": " Hello! "}}]})
@@ -207,6 +236,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
         for status in [401, 403, 404, 500]:
             with self.assertRaises(CheckError):
                 await self.call_api(status, {})
+            self.assertEqual(len(self.requests), 1)
 
     async def test_quota_delay_uses_provider_header_or_body(self):
         for headers, body, seconds in [({"Retry-After": "42"}, {}, 42), ({}, {"error": {"message": "try again in 2m"}}, 120)]:

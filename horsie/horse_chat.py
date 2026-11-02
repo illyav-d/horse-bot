@@ -42,34 +42,46 @@ async def chat_completion(messages):
                "max_completion_tokens": 500}
     if model == "qwen/qwen3.8-27b":
         payload["reasoning_effort"] = "none"
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        async with session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": "Bearer " + os.environ["GROQ_API_KEY"].strip()},
-            json=payload, allow_redirects=False,
-        ) as response:
-            if response.status != 200:
-                print(f"Horsie chat API failed: HTTP {response.status}, model={model}", flush=True)
-                if response.status == 404:
-                    raise CheckError("My chat model isn't available. An admin needs to check GROQ_CHAT_MODEL.")
-                if response.status == 429:
-                    try:
-                        body = await response.json()
-                    except (aiohttp.ClientError, ValueError):
-                        body = {}
-                    error = groq_error(429, body, response.headers.get("Retry-After"))
-                    raise error
-                if response.status in (401, 403):
-                    raise CheckError("My chat connection needs attention. An admin needs to check GROQ_API_KEY.")
-                raise CheckError("My chat service is temporarily unavailable. Please try again shortly.")
-            data = await response.json()
-    try:
-        answer = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as error:
-        raise CheckError("I couldn't finish that reply. Please try again.") from error
-    if not isinstance(answer, str) or not answer.strip():
-        raise CheckError("I couldn't finish that reply. Please try again.")
-    return answer.strip()[:6000]
+    # Both attempts share a deadline, rather than doubling the wait on empty replies.
+    async with asyncio.timeout(30), aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        for attempt in range(2):
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": "Bearer " + os.environ["GROQ_API_KEY"].strip()},
+                json=payload, allow_redirects=False,
+            ) as response:
+                if response.status != 200:
+                    print(f"Horsie chat API failed: HTTP {response.status}, model={model}", flush=True)
+                    if response.status == 404:
+                        raise CheckError("My chat model isn't available. An admin needs to check GROQ_CHAT_MODEL.")
+                    if response.status == 429:
+                        try:
+                            body = await response.json()
+                        except (aiohttp.ClientError, ValueError):
+                            body = {}
+                        error = groq_error(429, body, response.headers.get("Retry-After"))
+                        raise error
+                    if response.status in (401, 403):
+                        raise CheckError("My chat connection needs attention. An admin needs to check GROQ_API_KEY.")
+                    raise CheckError("My chat service is temporarily unavailable. Please try again shortly.")
+                data = await response.json()
+            try:
+                choice = data["choices"][0]
+                answer = choice["message"]["content"]
+                finish = choice.get("finish_reason", "missing")
+            except (KeyError, IndexError, TypeError):
+                answer, finish = None, "malformed_response"
+            if isinstance(answer, str) and answer.strip():
+                return answer.strip()[:6000]
+            # Only log fixed metadata categories, never channel text or provider bodies.
+            reason = finish if isinstance(finish, str) and finish in {
+                "stop", "length", "tool_calls", "content_filter", "missing", "malformed_response"
+            } else "other"
+            print(f"Horsie chat unusable reply: model={model}, finish={reason}, attempt={attempt + 1}/2", flush=True)
+            if reason == "length":
+                payload = {**payload, "max_completion_tokens": 1000}
+    raise CheckError("My AI service sent back an empty or unreadable answer twice. Please try again in a moment.")
+
 
 
 class HorseChat(commands.Cog):
