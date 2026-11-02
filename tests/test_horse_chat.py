@@ -95,6 +95,77 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         restarted = HorseChat(self.bot)
         self.assertIn("background", str(restarted.sessions))
 
+    async def test_explicit_memory_commands_survive_restart_and_forget(self):
+        with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="Neigh!")) as api:
+            save = self.request("<@42> remember I like racing")
+            await self.cog.on_message(save)
+            api.assert_not_awaited()
+            note = self.cog.long_term.notes[0]
+            self.assertEqual(note["text"], "I like racing")
+            restarted = HorseChat(self.bot)
+            await restarted.on_message(self.request("<@42> what should I play?"))
+            self.assertIn("I like racing", str(api.await_args.args[0]))
+            listing = self.request("<@42> memories")
+            await restarted.on_message(listing)
+            self.assertIn(note["id"], listing.reply.await_args.args[0])
+            await restarted.on_message(self.request("<@42> forget " + note["id"]))
+            self.assertFalse(HorseChat(self.bot).long_term.notes)
+            self.assertNotIn("I like racing", str(restarted.sessions))
+
+    async def test_cannot_forget_another_persons_note_or_clear_channel_without_permission(self):
+        mine, _ = self.cog.long_term.add(1, 20, 7, "personal", "racing")
+        other = self.request("<@42> forget " + mine["id"])
+        other.author.id = 8
+        await self.cog.on_message(other)
+        self.assertEqual(len(self.cog.long_term.notes), 1)
+        await self.cog.on_message(self.request("<@42> remember for the channel Friday is race night"))
+        self.assertEqual(self.cog.long_term.notes[-1]["scope"], "channel")
+        clear = self.request("<@42> forget channel")
+        await self.cog.on_message(clear)
+        self.assertIn("Manage Messages", clear.reply.await_args.args[0])
+        clear.author.guild_permissions = NS(manage_messages=True)
+        await self.cog.on_message(clear)
+        self.assertEqual([note["scope"] for note in self.cog.long_term.notes], ["personal"])
+
+    async def test_summary_recalled_after_recent_context_expires_and_survives_invalid_update(self):
+        now = asyncio.get_running_loop().time()
+        for number in range(12):
+            self.cog.remember((1, 20), now - 100 + number, "user", json.dumps({"speaker": "Alice", "text": "We joke about carrot taxes"}))
+        with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value='{"summary":"The group jokes about carrot taxes."}')):
+            await self.cog.summarize_channel()
+        self.assertIn("carrot taxes", self.cog.long_term.context(1, 20, 7)["content"])
+        self.cog.prune(now + TTL + 1)
+        self.assertFalse(self.cog.sessions)
+        await self.cog.save_memory()
+        restarted = HorseChat(self.bot)
+        self.assertIn("carrot taxes", restarted.long_term.context(1, 20, 8)["content"])
+
+        for number in range(12):
+            restarted.remember((1, 20), now + number, "user", "new messages")
+        restarted.long_term.summaries[(1, 20)]["covered"] -= 301
+        with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="not JSON")):
+            await restarted.summarize_channel()
+        self.assertIn("carrot taxes", restarted.long_term.context(1, 20, 8)["content"])
+
+    async def test_clear_channel_wins_over_inflight_summary(self):
+        now = asyncio.get_running_loop().time()
+        for number in range(12):
+            self.cog.remember((1, 20), now - 100 + number, "user", "old topic")
+        started, finish = asyncio.Event(), asyncio.Event()
+        async def summary(messages):
+            started.set()
+            await finish.wait()
+            return '{"summary":"old topic"}'
+        with patch("horsie.horse_chat.chat_completion", side_effect=summary):
+            task = asyncio.create_task(self.cog.summarize_channel())
+            await started.wait()
+            clear = self.request("<@42> forget channel")
+            clear.author.guild_permissions = NS(manage_messages=True)
+            await self.cog.on_message(clear)
+            finish.set()
+            await task
+        self.assertNotIn((1, 20), self.cog.long_term.summaries)
+
     async def test_cancelled_save_finishes_before_newer_snapshot(self):
         started, release = threading.Event(), threading.Event()
         count = 0

@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.8.12**
+Current version: **1.9.0**
 
 ## Project Layout
 
@@ -38,6 +38,10 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 - Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
 - On-demand light horse articles
 - Ping Horsie to assess your latest image or GIF for signs of AI generation
+
+## Version 1.9.0
+
+- Horsie now keeps lasting channel memories and notes you can review or forget.
 
 ## Version 1.8.12
 
@@ -88,11 +92,30 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 
 Mention Horsie with a message, for example `@Horsie how's your day?`, then use Discord's Reply on its answer to continue without another ping. Horsie responds only when invited, with short, friendly replies and occasional horse humor. Chat is available in server channels; DMs are ignored.
 
-Horsie follows new human text messages throughout the channel, including messages without a ping, using one shared conversation for everyone. Anyone can reply to Horsie's chat answers to continue. Messages are labelled with their speaker's display name, user ID, message ID and replied-to message ID so Horsie can follow who said what. It still only answers when mentioned or replied to; ordinary messages do not trigger AI calls. Bots, webhooks and DMs are ignored.
+Horsie follows new human text messages throughout the channel, including messages without a ping, using one shared conversation for everyone. Anyone can reply to Horsie's chat answers to continue. Messages are labelled with their speaker's display name, user ID, message ID and replied-to message ID so Horsie can follow who said what. It still only answers when mentioned or replied to; ordinary messages do not trigger chat replies. Bots, webhooks and DMs are ignored. Background summaries use occasional AI calls as described below.
 
 Memory holds up to 40 messages (human messages and Horsie's chat answers), at most 24,000 text characters per channel. Each message expires after 30 minutes, including time spent offline. Up to 128 channel memories are retained, with older channels evicted first. Channel text, speaker labels and reply IDs are saved atomically after each message in `horse_chat_memory.json` on the Railway volume (locally, `data/horse_chat_memory.json`). Set `HORSE_CHAT_MEMORY_FILE` to override the path. Recent context and reply follow-ups reload after a restart; expired messages are discarded on load and cleaned from storage every minute while running. It does not backfill Discord history. Channels, threads and servers have separate memories. When asked to respond, Horsie sends this recent shared channel context to Groq. Attachments are not read for chat. Horsie cannot browse or perform bot commands through chat.
 
 Chat uses the existing `GROQ_API_KEY`, with `qwen/qwen3.8-27b` by default (see [Groq's text chat documentation](https://console.groq.com/docs/text-chat)). Set `GROQ_CHAT_MODEL` to override it. Each channel and person can have one request in progress, and each person must wait five seconds after a successful reply before asking again. Up to three chat requests run at once, with a 30-second API timeout. Failed requests can be retried immediately unless Groq has imposed a quota pause; chat and image checks both consume the account's API quota.
+
+## Lasting Memories
+
+Mention Horsie or reply to its chat answer with these requests:
+
+| Request | Behavior |
+|---|---|
+| `remember I like horse racing` | Saves your personal note in this server |
+| `remember for the channel Friday is race night` | Saves a shared note for this channel |
+| `memories` or `what do you remember?` | Shows your notes, this channel's shared notes, and its summary |
+| `forget <ID>` | Removes a saved note by its displayed ID |
+| `forget my memories` | Clears your personal notes in this server |
+| `forget channel` | Clears shared notes, the summary, and recent context in this channel; requires Manage Messages |
+
+Saved notes have no time-based expiry and survive reboots. Personal notes are recalled only for their owner, within the same server. Shared notes and summaries stay in their original channel or thread; they are never recalled across servers. A note's creator can delete it; moderators can also delete shared channel notes. Memory requests are handled by the bot directly, so its acknowledgement reflects an actual save or deletion. Note commands are excluded from automatic summarization. The model receives stored memories as untrusted background, with recent corrections taking priority. Up to 20 relevant or recent notes are recalled per answer.
+
+Horsie also periodically condenses human channel messages into a short, evolving summary of recurring jokes, shared interests and ongoing group plans. One channel is summarized per minute at most, after 12 new human messages, or at least four messages nearing recent-context expiry. A channel waits at least five minutes between updates. Busy chat and quota pauses defer this work. Summaries are generated by AI, can be incomplete or mistaken, and are instructed to avoid secrets, sensitive personal details and personal profiles. They are not a full transcript. Invalid summary results keep the previous memory. There is no history backfill.
+
+The same persistent memory file holds notes and summaries. Limits are 500 characters per note, 50 personal notes per owner/server, 50 shared notes per channel, and 2,048 notes in total. Full note storage asks users to forget older notes rather than silently replacing them. Up to 128 channel summaries are retained, each under 1,500 characters, with the oldest updated summary replaced when that limit is reached. Summaries are automatically revised as conversation changes and can be cleared by a moderator. Recent chat still uses its existing 30-minute expiry. Background summaries use the configured Groq chat model and consume API quota; no new key is needed.
 
 ## Image Reality Checks
 
