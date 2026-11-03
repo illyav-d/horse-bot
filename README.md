@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.9.4**
+Current version: **1.9.5**
 
 ## Project Layout
 
@@ -38,6 +38,10 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 - Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
 - On-demand light horse articles
 - Ping Horsie to assess your latest image or GIF for signs of AI generation
+
+## Version 1.9.5
+
+- The bot owner can switch ChatGPT backup requests on or off.
 
 ## Version 1.9.4
 
@@ -104,6 +108,8 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 | `@Horsie` or `@Horsie is this real?` | Assesses your latest image or GIF in this channel for possible AI generation |
 | `@Horsie <message>` | Chats with Horsie; reply to its chat messages to continue |
 | `@Horsie usage` | Shows today's and the last seven UTC days' bot AI usage; requires Manage Server |
+| `@Horsie chatgpt on` / `@Horsie chatgpt off` | Enables or disables the ChatGPT final backup; subscription controller only |
+| `@Horsie chatgpt status` | Shows the saved ChatGPT switch setting; subscription controller only |
 
 ## Chat with Horsie
 
@@ -132,6 +138,8 @@ Daily aggregates are retained for 31 UTC dates, separated by feature and model, 
 The local `scripts/chatgpt_login.py` helper prepares a separate Sign in with ChatGPT registration for Horsie using OpenAI's public OAuth/PKCE flow. It does not reuse Codex credentials or request, import or search existing ChatGPT conversations, ChatGPT memories, weight, diet or calorie tracking. Only Horsie's supplied Discord context is used for inference. No tools, ChatGPT conversation IDs or previous response IDs are sent; requests use `store=false` and `stream=true`. Discord context remains isolated by channel/server, and personal notes are recalled only for their owner. Signing in grants model usage and may consume the subscriber's shared Plus allowance; it does not grant access to private ChatGPT chats.
 
 This connection is opt-in with `CHATGPT_LAST_RESORT=true` and valid Horsie credentials. It runs only after all three Groq chat models fail. Background summaries and image checks never use the subscription. It uses only model access authorized through the separate Horsie sign-in, not an OpenAI API key or another app's session.
+
+Use `@Horsie chatgpt off`, `@Horsie chatgpt on`, or `@Horsie chatgpt status` to control the subscription fallback without an AI call. Only the Discord user configured in `CHATGPT_CONTROLLER_ID` can use these controls; if unset, Discord's bot-owner check is used. Server-admin permission alone does not grant access. The switch is saved atomically in `horse_chatgpt_controls.json` on the normal data path, survives restarts, and defaults to on for an already configured host. Set `HORSE_CHATGPT_CONTROLS_FILE` to override the path. Switching off blocks new ChatGPT calls, including a call still waiting for token refresh; a request already sent may finish. Qwen and GPT-OSS remain available. No daily request cap, extra cooldown or audience restriction is added by this switch. Corrupt settings pause ChatGPT until a controller successfully saves a setting; save errors are reported rather than claiming persistence.
 
 The percentage safeguard defaults to strict: no new ChatGPT request is admitted at or above 75% of total Plus usage, or without a fresh verified reading. No documented, verified source of this overall percentage has been found in the sign-in API, so the strict setting currently blocks all ChatGPT requests. An owner who accepts proceeding without this automatic cutoff can explicitly set `CHATGPT_REQUIRE_USAGE_GUARD=false`. This does not remove OpenAI's own plan limits. Horsie's token counter and Codex quota are not substitutes for the shared Plus percentage. Native per-app limits remain available in ChatGPT Settings. `@Horsie usage` shows whether the automatic cutoff is required or explicitly disabled.
 
@@ -281,6 +289,8 @@ The bot reads configuration from environment variables.
 | `HORSE_CHAT_MEMORY_FILE` | No | Persistent channel memory path; defaults to `horse_chat_memory.json` on the Railway volume, or `data/horse_chat_memory.json` locally |
 | `HORSE_AI_USAGE_FILE` | No | Persistent AI usage totals; defaults to `horse_ai_usage.json` on the Railway volume, or `data/horse_ai_usage.json` locally |
 | `CHATGPT_LAST_RESORT` | No | Set `true` to opt in to the authorized ChatGPT final fallback |
+| `CHATGPT_CONTROLLER_ID` | No | Discord user ID allowed to use the ChatGPT switch; falls back to bot-owner verification if unset |
+| `HORSE_CHATGPT_CONTROLS_FILE` | No | Persistent on/off switch; defaults to `horse_chatgpt_controls.json` on the normal data path |
 | `CHATGPT_REQUIRE_USAGE_GUARD` | No | Defaults to `true`; explicit `false` waives the currently unavailable automatic 75% Plus cutoff |
 | `HORSE_CHATGPT_AUTH_FILE` | No | Protected Horsie ChatGPT registration on the normal data path |
 | `HORSE_CHATGPT_AUTH_BOOTSTRAP` | No | Secret base64 registration used once if the remote credential file is absent; never log or commit |

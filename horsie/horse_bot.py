@@ -48,10 +48,10 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.9.4"
+VERSION = "1.9.5"
 
 CHANGELOG = [
-    "Horsie can use an authorized ChatGPT connection as a final chat backup.",
+    "The bot owner can switch ChatGPT backup requests on or off.",
 ]
 
 

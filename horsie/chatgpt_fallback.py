@@ -13,6 +13,7 @@ import aiohttp
 
 from horsie.ai_usage import record_api_usage
 from horsie.data_storage import data_path
+from horsie.chatgpt_controls import controls, ControlError
 
 
 ISSUER = "https://auth.openai.com"
@@ -37,7 +38,8 @@ def auth_path():
 
 def enabled():
     return os.getenv("CHATGPT_LAST_RESORT", "").lower() == "true" and (
-        auth_path().is_file() or bool(os.getenv("HORSE_CHATGPT_AUTH_BOOTSTRAP", "")))
+        auth_path().is_file() or bool(os.getenv("HORSE_CHATGPT_AUTH_BOOTSTRAP", ""))) and (
+        controls().snapshot()["enabled"] and controls().storage_ok)
 
 
 def require_usage_guard():
@@ -190,6 +192,9 @@ async def completion(messages, plan_usage=None):
             model = os.getenv("CHATGPT_FALLBACK_MODEL", "").strip() or record.get("model", "")
             if not model:
                 raise ChatGPTError("Select a ChatGPT fallback model during setup.")
+            # Recheck after refresh I/O: an owner may have switched it off.
+            if not enabled():
+                raise ChatGPTError("ChatGPT requests are switched off.")
             attempted = True
             async with session.post(RESOURCE + "/responses", headers={"Authorization": "Bearer " + record["access_token"]},
                 json=response_payload(messages, model), allow_redirects=False) as response:

@@ -29,7 +29,8 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.env = patch.dict(os.environ, {"GROQ_API_KEY": "test-key", "HORSE_CHAT_MEMORY_FILE": os.path.join(self.directory.name, "memory.json")})
+        self.env = patch.dict(os.environ, {"GROQ_API_KEY": "test-key", "HORSE_CHAT_MEMORY_FILE": os.path.join(self.directory.name, "memory.json"),
+                                          "HORSE_CHATGPT_CONTROLS_FILE": os.path.join(self.directory.name, "controls.json")})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.bot = NS(user=NS(id=42))
@@ -198,6 +199,28 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
             report.assert_awaited_once()
             api.assert_not_awaited()
             self.assertIn("120 reported tokens", request.reply.await_args.args[0])
+
+    async def test_only_controller_can_toggle_chatgpt_without_ai_calls(self):
+        from horsie import chatgpt_fallback
+        with patch.dict(os.environ, {"CHATGPT_CONTROLLER_ID": "7"}), \
+                patch("horsie.horse_chat.chat_completion", AsyncMock()) as api:
+            request = self.request("<@42> chatgpt off")
+            request.author.id = 8
+            request.author.guild_permissions = NS(manage_guild=True, administrator=True)
+            await self.cog.on_message(request)
+            self.assertTrue(chatgpt_fallback.controls().snapshot()["enabled"])
+            self.assertIn("Only the subscription controller", request.reply.await_args.args[0])
+            request.author.id = 7
+            await self.cog.on_message(request)
+            self.assertFalse(chatgpt_fallback.controls().snapshot()["enabled"])
+            self.assertIn("OFF", request.reply.await_args.args[0])
+            request.content = "<@42> chatgpt on"
+            await self.cog.on_message(request)
+            self.assertTrue(chatgpt_fallback.controls().snapshot()["enabled"])
+            request.content = "<@42> chatgpt status"
+            await self.cog.on_message(request)
+            self.assertIn("ON", request.reply.await_args.args[0])
+            api.assert_not_awaited()
 
     async def test_clear_channel_wins_over_inflight_summary(self):
         now = asyncio.get_running_loop().time()

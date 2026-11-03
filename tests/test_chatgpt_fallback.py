@@ -19,7 +19,8 @@ class ChatGPTTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "auth.json"
         env = patch.dict(os.environ, {"HORSE_CHATGPT_AUTH_FILE": str(self.path), "CHATGPT_LAST_RESORT": "true",
-                                     "CHATGPT_REQUIRE_USAGE_GUARD": "true"})
+                                     "CHATGPT_REQUIRE_USAGE_GUARD": "true",
+                                     "HORSE_CHATGPT_CONTROLS_FILE": str(self.path.with_name("controls.json"))})
         env.start()
         self.addCleanup(env.stop)
         pause = patch.object(fallback, "blocked_until", 0)
@@ -146,3 +147,20 @@ class ChatGPTTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(fallback.ChatGPTError):
                     await fallback.completion([])
                 access.assert_not_awaited()
+
+    async def test_switch_off_blocks_requests_and_switching_during_refresh_blocks_send(self):
+        fallback.save_auth(self.path, self.record())
+        fallback.controls().update(enabled=False)
+        with patch.object(fallback.aiohttp, "ClientSession") as session:
+            with self.assertRaises(fallback.ChatGPTError):
+                await fallback.completion([], self.snapshot())
+            session.assert_not_called()
+        fallback.controls().update(enabled=True)
+        async def refresh(session):
+            fallback.controls().update(enabled=False)
+            return self.record()
+        with patch.object(fallback, "access_record", side_effect=refresh), \
+                patch.object(fallback, "record_api_usage", AsyncMock()) as usage:
+            with self.assertRaisesRegex(fallback.ChatGPTError, "switched off"):
+                await fallback.completion([], self.snapshot())
+            usage.assert_not_awaited()

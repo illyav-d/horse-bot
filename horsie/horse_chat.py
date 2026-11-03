@@ -336,6 +336,9 @@ class HorseChat(commands.Cog):
         clean = text.strip().rstrip("?.!").strip()
         guild, channel, owner = message.guild.id, message.channel.id, message.author.id
         admin = bool(getattr(getattr(message.author, "guild_permissions", None), "manage_messages", False))
+        if clean.lower().split()[:1] == ["chatgpt"]:
+            await self.chatgpt_command(message, clean.lower())
+            return True
         if clean.lower() in {"usage", "ai usage", "token usage"}:
             if not getattr(getattr(message.author, "guild_permissions", None), "manage_guild", False):
                 await self.memory_reply(message, "Someone with Manage Server permission can check the bot's AI usage.")
@@ -405,6 +408,34 @@ class HorseChat(commands.Cog):
             await self.memory_reply(message, reply)
             return True
         return False
+
+    async def is_chatgpt_controller(self, author):
+        configured = os.getenv("CHATGPT_CONTROLLER_ID", "").strip()
+        if configured:
+            return configured.isdigit() and str(author.id) == configured
+        check = getattr(self.bot, "is_owner", None)
+        return check is not None and await check(author) is True
+
+    async def chatgpt_command(self, message, text):
+        if not await self.is_chatgpt_controller(message.author):
+            await self.memory_reply(message, "Only the subscription controller can change or view ChatGPT request settings.")
+            return
+        action = text.split()[1:]
+        settings = chatgpt_fallback.controls()
+        changes = None
+        if action == ["on"]:
+            changes = {"enabled": True}
+        elif action == ["off"]:
+            changes = {"enabled": False}
+        elif action not in ([], ["status"]):
+            await self.memory_reply(message, "Use `chatgpt on`, `chatgpt off`, or `chatgpt status`.")
+            return
+        try:
+            if changes is not None:
+                await asyncio.to_thread(settings.update, **changes)
+            await self.memory_reply(message, settings.report())
+        except chatgpt_fallback.ControlError as error:
+            await self.memory_reply(message, str(error))
 
     async def summarize_channel(self):
         if (not os.getenv("GROQ_API_KEY", "").strip() or self.active or self.summarizing or
