@@ -48,10 +48,10 @@ FOREVER_CHANNEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 
 CHANGELOG = [
-    "Horsie chats more efficiently and lets server admins check AI usage.",
+    "Horsie automatically switches chat models when one is busy or unavailable.",
 ]
 
 

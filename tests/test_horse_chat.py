@@ -19,7 +19,8 @@ from horsie.data_storage import write_json
 def setUpModule():
     directory = tempfile.TemporaryDirectory()
     unittest.addModuleCleanup(directory.cleanup)
-    env = patch.dict(os.environ, {"HORSE_AI_USAGE_FILE": os.path.join(directory.name, "usage.json")})
+    env = patch.dict(os.environ, {"HORSE_AI_USAGE_FILE": os.path.join(directory.name, "usage.json"),
+                                 "GROQ_CHAT_FALLBACK_MODELS": ""})
     env.start()
     unittest.addModuleCleanup(env.stop)
 
@@ -346,6 +347,11 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatApiTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        pause = patch("horsie.horse_chat.MODEL_PAUSES", {})
+        pause.start()
+        self.addCleanup(pause.stop)
+
     async def test_bounded_request_keeps_reply_target_and_leaves_full_history_saved(self):
         history = [{"role": "user", "content": json.dumps({"speaker": "Alice", "user_id": "7",
                     "message_id": str(i), "text": "racing " * 200})} for i in range(30)]
@@ -436,7 +442,8 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
             client = MagicMock()
             client.__aenter__ = AsyncMock(return_value=session)
             client.__aexit__ = AsyncMock(return_value=False)
-            env = {"GROQ_API_KEY": "test-key", "HORSE_AI_USAGE_FILE": os.environ["HORSE_AI_USAGE_FILE"]}
+            env = {"GROQ_API_KEY": "test-key", "HORSE_AI_USAGE_FILE": os.environ["HORSE_AI_USAGE_FILE"],
+                   "GROQ_CHAT_FALLBACK_MODELS": ""}
             if value is not None:
                 env["GROQ_CHAT_MODEL"] = value
             with patch.dict(os.environ, env, clear=True), patch("horsie.horse_chat.aiohttp.ClientSession", return_value=client):
@@ -457,7 +464,8 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
         client = MagicMock()
         client.__aenter__ = AsyncMock(return_value=session)
         client.__aexit__ = AsyncMock(return_value=False)
-        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key", "GROQ_CHAT_MODEL": "chosen-model"}), patch("horsie.horse_chat.aiohttp.ClientSession", return_value=client):
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key", "GROQ_CHAT_MODEL": "chosen-model"}), \
+                patch("horsie.horse_chat.MODEL_PAUSES", {}), patch("horsie.horse_chat.aiohttp.ClientSession", return_value=client):
             try:
                 answer = await chat_completion([{"role": "user", "content": "hello"}])
             finally:

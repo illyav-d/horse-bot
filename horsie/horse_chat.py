@@ -49,6 +49,18 @@ MAX_CONTEXT_CHARS = 24000
 REQUEST_HISTORY_CHARS = 6000
 REQUEST_HISTORY_MESSAGES = 12
 SUMMARY_INPUT_CHARS = 6000
+DEFAULT_FALLBACK_MODELS = "openai/gpt-oss-20b,openai/gpt-oss-120b"
+MODEL_PAUSES = {}
+
+
+class ModelUnavailable(CheckError):
+    """A model-specific failure that another model may recover from."""
+
+
+def chat_models():
+    primary = os.getenv("GROQ_CHAT_MODEL", "").strip() or DEFAULT_MODEL
+    backups = os.getenv("GROQ_CHAT_FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS).split(",")
+    return list(dict.fromkeys([primary] + [model.strip() for model in backups if model.strip()]))[:3]
 
 
 def context_excerpt(item, limit):
@@ -132,31 +144,32 @@ def completion_messages(messages):
     return messages[:-1] + [{**messages[-1], "content": content}]
 
 
-async def chat_completion(messages):
+async def model_completion(messages, model, summary_request=False, attempts=2, fallback=False):
     messages = completion_messages(messages)
-    summary_request = bool(messages and messages[0].get("content") == SUMMARY_INSTRUCTIONS)
     feature = "summary" if summary_request else "chat"
-    model = os.getenv("GROQ_CHAT_MODEL", "").strip() or DEFAULT_MODEL
     payload = {"model": model, "messages": messages, "temperature": 0.7,
                "max_completion_tokens": 500}
     if model == "qwen/qwen3.8-27b":
         payload["reasoning_effort"] = "none"
+    elif model.startswith("openai/gpt-oss-"):
+        payload["reasoning_effort"] = "low"
     if summary_request:
         payload["response_format"] = {"type": "json_object"}
-    # Both attempts share a deadline, rather than doubling the wait on empty replies.
-    async with asyncio.timeout(30), aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        for attempt in range(2):
-            status, data, headers = await groq_request(session, model, payload, feature, attempt > 0)
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+        for attempt in range(attempts):
+            async with asyncio.timeout(8):
+                status, data, headers = await groq_request(session, model, payload, feature, fallback or attempt > 0)
             if status != 200:
                 print(f"Horsie chat API failed: HTTP {status}, model={model}", flush=True)
                 if status == 404:
-                    raise CheckError("My chat model isn't available. An admin needs to check GROQ_CHAT_MODEL.")
+                    raise ModelUnavailable("My chat model isn't available. An admin needs to check GROQ_CHAT_MODEL.")
                 if status == 429:
                     error = groq_error(429, data, headers.get("Retry-After"))
                     raise error
                 if status in (401, 403):
                     raise CheckError("My chat connection needs attention. An admin needs to check GROQ_API_KEY.")
-                raise CheckError("My chat service is temporarily unavailable. Please try again shortly.")
+                error_type = ModelUnavailable if status in (408, 500, 502, 503, 504) else CheckError
+                raise error_type("My chat service is temporarily unavailable. Please try again shortly.")
             try:
                 choice = data["choices"][0]
                 answer = choice["message"]["content"]
@@ -169,7 +182,9 @@ async def chat_completion(messages):
             reason = finish if isinstance(finish, str) and finish in {
                 "stop", "length", "tool_calls", "content_filter", "missing", "malformed_response"
             } else "other"
-            print(f"Horsie chat unusable reply: model={model}, finish={reason}, attempt={attempt + 1}/2", flush=True)
+            print(f"Horsie chat unusable reply: model={model}, finish={reason}, attempt={attempt + 1}/{attempts}", flush=True)
+            if reason == "content_filter":
+                raise CheckError("My AI service couldn't provide a reply to that request.")
             if summary_request:
                 # Background work can wait; never double its cost for a blank reply.
                 raise CheckError("The memory summary was empty; it will be retried later.")
@@ -182,7 +197,45 @@ async def chat_completion(messages):
                 history = [item for item in messages[1:-1] if item not in retained]
                 smaller = request_history(history, messages[-1], max_chars=2000, max_messages=4)
                 payload = {**payload, "messages": messages[:1] + retained + smaller + messages[-1:]}
-    raise CheckError("My AI service sent back an empty or unreadable answer twice. Please try again in a moment.")
+    detail = " twice" if attempts == 2 else ""
+    raise ModelUnavailable(f"My AI service sent back an empty or unreadable answer{detail}. Please try again in a moment.")
+
+
+async def chat_completion(messages):
+    """Try models in order, skipping their own cooldowns, within one deadline."""
+    models = chat_models()
+    summary_request = bool(messages and messages[0].get("content") == SUMMARY_INSTRUCTIONS)
+    if summary_request:
+        models = models[:1]  # Reserve backup allowances for people chatting.
+    errors = []
+    async with asyncio.timeout(30):
+        for index, model in enumerate(models):
+            now = time.monotonic()
+            deadline, previous = MODEL_PAUSES.get(model, (0, None))
+            if now < deadline:
+                error = QuotaError(math.ceil(deadline - now), previous.daily) if isinstance(previous, QuotaError) else previous
+                errors.append(error)
+                continue
+            MODEL_PAUSES.pop(model, None)
+            try:
+                answer = await model_completion(messages, model, summary_request,
+                    attempts=1 if summary_request or len(models) > 1 else 2, fallback=index > 0)
+                if index:
+                    print(f"Horsie chat backup used: model={model}", flush=True)
+                return answer
+            except QuotaError as error:
+                MODEL_PAUSES[model] = (time.monotonic() + error.seconds, error)
+                errors.append(error)
+            except (ModelUnavailable, asyncio.TimeoutError, aiohttp.ClientError, ValueError) as error:
+                # Briefly skip an unavailable model across concurrent requests.
+                safe = error if isinstance(error, ModelUnavailable) else ModelUnavailable("My chat service is temporarily unavailable. Please try again shortly.")
+                MODEL_PAUSES[model] = (time.monotonic() + 30, safe)
+                errors.append(safe)
+    if errors and all(isinstance(error, QuotaError) for error in errors):
+        raise min(errors, key=lambda error: error.seconds)
+    if len(models) == 1 and errors:
+        raise errors[0]
+    raise ModelUnavailable("My chat models couldn't produce a reply. Please try again shortly.")
 
 
 
@@ -389,7 +442,8 @@ class HorseChat(commands.Cog):
                     self.memory_revision += 1
                     await self.save_memory()
             except QuotaError as error:
-                self.blocked_until = time.monotonic() + error.seconds
+                # A summary's primary-model quota must not block chat backups.
+                self.summary_attempts[key] = time.monotonic() + max(600, error.seconds)
             except (CheckError, ValueError, asyncio.TimeoutError, aiohttp.ClientError):
                 print("Horsie channel summary deferred; previous long-term memory retained.", flush=True)
             finally:

@@ -86,6 +86,11 @@ class UsageLedger:
                 selected = [row for key, row in rows.items() if key.startswith(feature + ":")]
                 lines.append(f"{label}: {sum(row['total'] for row in selected):,} tokens / "
                              f"{sum(row['requests'] for row in selected):,} attempts.")
+            models = sorted({key.split(":", 1)[1] for key in rows})
+            for model in models[:5]:
+                selected = [row for key, row in rows.items() if key.split(":", 1)[1] == model]
+                lines.append(f"{model}: {sum(row['total'] for row in selected):,} tokens / "
+                             f"{sum(row['requests'] for row in selected):,} attempts.")
             lines += [f"Last 7 UTC days: {week:,} reported tokens.",
                       f"{totals['cached']:,} cached input tokens (already included in input).",
                       f"{totals['unreported']:,} attempts today had no token counts; totals may be incomplete.",
