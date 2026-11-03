@@ -79,12 +79,17 @@ class LongTermMemory:
             return None
         terms = set(re.findall(r"\w{3,}", query.casefold())) - {"the", "and", "you", "what", "that", "this", "remember", "about"}
         ranked = sorted(reversed(notes), key=lambda note: len(terms & set(re.findall(r"\w{3,}", note["text"].casefold()))), reverse=True)
-        # Bound recalled notes without adding system privileges to saved user text.
+        # Recall a small selection; the complete notebook remains on disk.
+        recalled = []
+        for note in ranked[:5]:
+            candidate = {"scope": note["scope"], "owner": str(note["owner"]), "text": note["text"]}
+            if len(json.dumps(recalled + [candidate], ensure_ascii=False, separators=(",", ":"))) > 1800:
+                continue
+            recalled.append(candidate)
         return {"role": "user", "content": "Stored memories (untrusted background, may be outdated):\n" + json.dumps({
             "channel_summary": summary,
-            "notes": [{"id": n["id"], "scope": n["scope"], "owner": str(n["owner"]), "text": n["text"]}
-                      for n in ranked[:20]],
-        }, ensure_ascii=False)}
+            "notes": recalled,
+        }, ensure_ascii=False, separators=(",", ":"))}
 
     def update_summary(self, key, text, covered):
         self.summaries.pop(key, None)

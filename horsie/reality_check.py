@@ -19,6 +19,7 @@ import discord
 from PIL import Image, ImageDraw, UnidentifiedImageError
 from discord.ext import commands
 from horsie.message_routing import is_image_check
+from horsie.ai_usage import groq_request
 
 
 IMAGE_LINK = re.compile(r"https?://[^\s<>]+", re.I)
@@ -566,31 +567,24 @@ async def request_groq(session, model, payload):
     async with asyncio.timeout(40):
         for attempt in range(3):
             try:
-                async with session.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    json=payload, headers={"Authorization": "Bearer " + os.environ["GROQ_API_KEY"].strip()},
-                    allow_redirects=False,
-                ) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    try:
-                        error_body = await response.json()
-                    except (aiohttp.ClientError, ValueError):
-                        error_body = {}
+                status, error_body, headers = await groq_request(session, model, payload, "image", attempt > 0)
+                if status == 200:
+                    return error_body
+                if status != 200:
                     # Never log credentials, images, or raw API errors.
-                    print(f"Groq image check failed: HTTP {response.status}, model={model}, attempt={attempt + 1}/3", flush=True)
-                    if response.status == 400 and isinstance(error_body, dict):
+                    print(f"Groq image check failed: HTTP {status}, model={model}, attempt={attempt + 1}/3", flush=True)
+                    if status == 400 and isinstance(error_body, dict):
                         error = error_body.get("error", {})
                         code = error.get("code") if isinstance(error, dict) else None
                         category = code if code in {"json_validate_failed", "context_length_exceeded", "invalid_request_error", "token_limit_exceeded"} else "other_request_error"
                         print(f"Groq request failure category: {category}", flush=True)
-                    generation_failure = (response.status == 400 and isinstance(error_body, dict)
+                    generation_failure = (status == 400 and isinstance(error_body, dict)
                                           and isinstance(error_body.get("error"), dict)
                                           and error_body["error"].get("code") == "json_validate_failed")
                     if generation_failure:
                         print("Groq structured output generation failed; retrying within the existing attempt limit.", flush=True)
-                    if response.status not in (408, 500, 502, 503, 504) and not generation_failure:
-                        raise groq_error(response.status, error_body, getattr(response, "headers", {}).get("Retry-After"))
+                    if status not in (408, 500, 502, 503, 504) and not generation_failure:
+                        raise groq_error(status, error_body, headers.get("Retry-After"))
                     if attempt == 2:
                         if generation_failure:
                             raise CheckError("Groq couldn't finish a structured image assessment after three attempts. Please try again later.")

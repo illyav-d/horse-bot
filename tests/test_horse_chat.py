@@ -7,11 +7,21 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from horsie.horse_chat import DEFAULT_MODEL, HorseChat, TTL, chat_completion
+from horsie.horse_chat import (DEFAULT_MODEL, HorseChat, TTL, chat_completion,
+                               completion_messages, request_history, REQUEST_HISTORY_CHARS)
+from horsie.long_term_memory import SUMMARY_INSTRUCTIONS
 from horsie.message_routing import is_image_check
 from horsie.reality_check import CheckError, QuotaError, RealityCheck
 from tests.test_reality_check import message
 from horsie.data_storage import write_json
+
+
+def setUpModule():
+    directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+    env = patch.dict(os.environ, {"HORSE_AI_USAGE_FILE": os.path.join(directory.name, "usage.json")})
+    env.start()
+    unittest.addModuleCleanup(env.stop)
 
 
 class ChatTests(unittest.IsolatedAsyncioTestCase):
@@ -146,6 +156,34 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="not JSON")):
             await restarted.summarize_channel()
         self.assertIn("carrot taxes", restarted.long_term.context(1, 20, 8)["content"])
+
+    async def test_failed_summary_waits_ten_minutes_and_other_channels_can_progress(self):
+        now = asyncio.get_running_loop().time()
+        for channel in (20, 21):
+            for number in range(12):
+                self.cog.remember((1, channel), now - 100 + number, "user", "racing")
+        with patch("horsie.horse_chat.chat_completion", AsyncMock(side_effect=CheckError("empty"))) as api:
+            await self.cog.summarize_channel()
+            await self.cog.summarize_channel()
+            await self.cog.summarize_channel()
+            self.assertEqual(api.await_count, 2)
+        self.cog.summary_attempts[(1, 20)] = now - 1
+        with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value='{"summary":"racing"}')) as api:
+            await self.cog.summarize_channel()
+            api.assert_awaited_once()
+
+    async def test_usage_is_local_admin_only_and_does_not_spend_ai_tokens(self):
+        with patch("horsie.horse_chat.chat_completion", AsyncMock()) as api, \
+                patch("horsie.horse_chat.usage_report", AsyncMock(return_value="120 reported tokens")) as report:
+            request = self.request("<@42> usage")
+            await self.cog.on_message(request)
+            report.assert_not_awaited()
+            self.assertIn("Manage Server", request.reply.await_args.args[0])
+            request.author.guild_permissions = NS(manage_guild=True)
+            await self.cog.on_message(request)
+            report.assert_awaited_once()
+            api.assert_not_awaited()
+            self.assertIn("120 reported tokens", request.reply.await_args.args[0])
 
     async def test_clear_channel_wins_over_inflight_summary(self):
         now = asyncio.get_running_loop().time()
@@ -308,6 +346,60 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bounded_request_keeps_reply_target_and_leaves_full_history_saved(self):
+        history = [{"role": "user", "content": json.dumps({"speaker": "Alice", "user_id": "7",
+                    "message_id": str(i), "text": "racing " * 200})} for i in range(30)]
+        original = json.dumps(history)
+        current = {"role": "user", "content": json.dumps({"reply_to": "2", "text": "What about that?"})}
+        selected = request_history(history, current)
+        self.assertLessEqual(sum(len(item["content"]) for item in selected), REQUEST_HISTORY_CHARS)
+        self.assertLessEqual(len(selected), 12)
+        self.assertEqual(json.loads(selected[0]["content"])["message_id"], "2")
+        self.assertEqual(json.loads(selected[-1]["content"])["message_id"], "29")
+        self.assertEqual(json.dumps(history), original)
+
+    async def test_summary_requests_json_and_never_retries_empty_generation_immediately(self):
+        messages = [{"role": "system", "content": SUMMARY_INSTRUCTIONS},
+                    {"role": "user", "content": '{"previous_summary":"","messages":[]}'}]
+        with patch("horsie.horse_chat.groq_request", AsyncMock(return_value=(
+            200, {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]}, {}))) as request:
+            with self.assertRaisesRegex(CheckError, "retried later"):
+                await chat_completion(messages)
+        request.assert_awaited_once()
+        self.assertEqual(request.await_args.args[3], "summary")
+        self.assertEqual(request.await_args.args[2]["response_format"], {"type": "json_object"})
+
+    async def test_current_question_is_plain_text_without_rewriting_saved_context(self):
+        history = {"role": "user", "content": json.dumps({"speaker": "Alice", "user_id": "7", "text": "race tonight"})}
+        current = {"role": "user", "content": json.dumps({"speaker": "Bob", "user_id": "8",
+                   "message_id": "101", "reply_to": "100", "text": "What snacks?\nCarrots?"})}
+        messages = [{"role": "system", "content": "Keep your personality"}, history, current]
+        original = json.dumps(messages)
+        response = NS(status=200, json=AsyncMock(return_value={"choices": [{"message": {"content": "Carrots!"}}]}))
+        request = MagicMock()
+        request.__aenter__ = AsyncMock(return_value=response)
+        request.__aexit__ = AsyncMock(return_value=False)
+        session = MagicMock()
+        session.post.return_value = request
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=session)
+        client.__aexit__ = AsyncMock(return_value=False)
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), patch("horsie.horse_chat.aiohttp.ClientSession", return_value=client):
+            self.assertEqual(await chat_completion(messages), "Carrots!")
+        sent = session.post.call_args.kwargs["json"]["messages"]
+        self.assertEqual(sent[:-1], messages[:-1])
+        metadata, question = sent[-1]["content"].split("\nMessage to answer:\n", 1)
+        self.assertEqual(question, "What snacks?\nCarrots?")
+        self.assertEqual(json.loads(metadata.split(": ", 1)[1]),
+                         {"speaker": "Bob", "user_id": "8", "message_id": "101", "reply_to": "100"})
+        self.assertEqual(json.dumps(messages), original)
+
+    async def test_summary_json_and_ordinary_questions_are_not_reinterpreted(self):
+        for content in ('{"previous_summary": "race", "messages": ["carrots"]}',
+                        '{"text": "This is ordinary JSON"}', 'hello', '[]'):
+            messages = [{"role": "system", "content": "summary rules"}, {"role": "user", "content": content}]
+            self.assertEqual(completion_messages(messages), messages)
+
     async def test_empty_reply_retries_shorter_context_without_mutating_memory(self):
         response = NS(status=200, json=AsyncMock(side_effect=[
             {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]},
@@ -328,7 +420,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await chat_completion(messages), "Hello!")
         first, second = [call.kwargs["json"]["messages"] for call in session.post.call_args_list]
         self.assertEqual(len(first), 22)
-        self.assertEqual(len(second), 10)
+        self.assertEqual(len(second), 7)
         self.assertEqual(second[0], messages[0])
         self.assertEqual(second[1], messages[1])
         self.assertEqual(second[-1], messages[-1])
@@ -344,7 +436,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
             client = MagicMock()
             client.__aenter__ = AsyncMock(return_value=session)
             client.__aexit__ = AsyncMock(return_value=False)
-            env = {"GROQ_API_KEY": "test-key"}
+            env = {"GROQ_API_KEY": "test-key", "HORSE_AI_USAGE_FILE": os.environ["HORSE_AI_USAGE_FILE"]}
             if value is not None:
                 env["GROQ_CHAT_MODEL"] = value
             with patch.dict(os.environ, env, clear=True), patch("horsie.horse_chat.aiohttp.ClientSession", return_value=client):

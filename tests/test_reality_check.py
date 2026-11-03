@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import tempfile
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +14,14 @@ import aiohttp
 from PIL import Image
 
 from horsie.reality_check import GIF_CAUTION, CheckError, QuotaError, RealityCheck, assess, download_image, image_urls, validate_image_url, PublicImageResolver, groq_error, request_groq, gif_parts, find_message_images, resolve_image_page
+
+
+def setUpModule():
+    directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+    env = patch.dict(os.environ, {"HORSE_AI_USAGE_FILE": os.path.join(directory.name, "usage.json")})
+    env.start()
+    unittest.addModuleCleanup(env.stop)
 
 
 def gif_fixture(count=10, durations=100):

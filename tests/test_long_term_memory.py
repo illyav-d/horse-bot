@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 
@@ -52,3 +53,14 @@ class LongTermTests(unittest.TestCase):
             self.memory.add(1, 20, 7, "personal", "Unrelated note " + str(number))
         recalled = self.memory.context(1, 20, 7, "Which game is my favourite?")
         self.assertIn("Horsejack", recalled["content"])
+
+    def test_recall_budget_preserves_entire_notebook_and_summary(self):
+        self.memory.update_summary((1, 20), "racing plans", 1)
+        for number in range(30):
+            self.memory.add(1, 20, 7, "personal", str(number) + " carrots" * 60)
+        recalled = self.memory.context(1, 20, 7, "carrots")
+        data = json.loads(recalled["content"].split("\n", 1)[1])
+        self.assertLessEqual(len(data["notes"]), 5)
+        self.assertLessEqual(len(json.dumps(data["notes"], ensure_ascii=False, separators=(",", ":"))), 1800)
+        self.assertEqual(data["channel_summary"], "racing plans")
+        self.assertEqual(len(self.memory.notes), 30)

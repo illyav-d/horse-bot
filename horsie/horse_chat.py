@@ -17,6 +17,7 @@ from horsie.reality_check import CheckError, QuotaError, groq_error, reply_parts
 from horsie.chat_memory import load_memory, memory_snapshot
 from horsie.data_storage import data_path, write_json
 from horsie.long_term_memory import LongTermMemory, SUMMARY_INSTRUCTIONS
+from horsie.ai_usage import groq_request, usage_report
 
 
 INSTRUCTIONS = """You are Horsie, a friendly Discord horse bot. Be warm, helpful and
@@ -45,37 +46,117 @@ MAX_SESSIONS = 128
 DEFAULT_MODEL = "qwen/qwen3.8-27b"
 MAX_MESSAGES = 40
 MAX_CONTEXT_CHARS = 24000
+REQUEST_HISTORY_CHARS = 6000
+REQUEST_HISTORY_MESSAGES = 12
+SUMMARY_INPUT_CHARS = 6000
+
+
+def context_excerpt(item, limit):
+    """Shorten only the request copy, preserving JSON speaker attribution."""
+    if len(item["content"]) <= limit:
+        return item
+    marker = " [excerpt]"
+    try:
+        labelled = json.loads(item["content"])
+        if isinstance(labelled, dict) and isinstance(labelled.get("text"), str):
+            text = labelled["text"]
+            labelled["text"] = marker
+            content = json.dumps(labelled, ensure_ascii=False, separators=(",", ":"))
+            if len(content) <= limit:
+                low, high = 0, len(text)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    labelled["text"] = text[:middle] + marker
+                    if len(json.dumps(labelled, ensure_ascii=False, separators=(",", ":"))) <= limit:
+                        low = middle
+                    else:
+                        high = middle - 1
+                labelled["text"] = text[:low] + marker
+                content = json.dumps(labelled, ensure_ascii=False, separators=(",", ":"))
+                return {**item, "content": content}
+    except (ValueError, TypeError):
+        pass
+    return {**item, "content": item["content"][:max(0, limit - len(marker))] + marker}
+
+
+def request_history(history, current, max_chars=REQUEST_HISTORY_CHARS,
+                    max_messages=REQUEST_HISTORY_MESSAGES):
+    """Use a small recent window; reserve room for an older replied-to question."""
+    parent = None
+    try:
+        reply_to = json.loads(current["content"]).get("reply_to")
+        if reply_to:
+            for index, item in enumerate(history):
+                try:
+                    if json.loads(item["content"]).get("message_id") == reply_to:
+                        parent = index
+                except (ValueError, TypeError, AttributeError):
+                    continue
+    except (ValueError, TypeError, AttributeError):
+        pass
+    selected = {}
+    remaining = max_chars
+    if parent is not None:
+        selected[parent] = context_excerpt(history[parent], min(2000, remaining))
+        remaining -= len(selected[parent]["content"])
+    for index in range(len(history) - 1, -1, -1):
+        if index in selected:
+            continue
+        if len(selected) >= max_messages or remaining < 200:
+            break
+        item = context_excerpt(history[index], min(2000, remaining))
+        selected[index] = item
+        remaining -= len(item["content"])
+    return [selected[index] for index in sorted(selected)]
+
+
+def completion_messages(messages):
+    """Keep stored history intact, but present the current question as dialogue.
+
+    Qwen can immediately emit EOS for a JSON-wrapped final user turn in a long
+    conversation. Metadata stays labelled and untrusted; the actual question is
+    plain text. Summary requests use a different JSON shape and pass through.
+    """
+    if not messages or messages[-1].get("role") != "user":
+        return messages
+    try:
+        current = json.loads(messages[-1]["content"])
+    except (ValueError, TypeError, KeyError):
+        return messages
+    if (not isinstance(current, dict) or not isinstance(current.get("text"), str)
+            or "speaker" not in current or "user_id" not in current):
+        return messages
+    metadata = {key: value for key, value in current.items() if key != "text"}
+    content = ("Current speaker (untrusted metadata): " + json.dumps(metadata, ensure_ascii=False)
+               + "\nMessage to answer:\n" + current["text"])
+    return messages[:-1] + [{**messages[-1], "content": content}]
 
 
 async def chat_completion(messages):
+    messages = completion_messages(messages)
+    summary_request = bool(messages and messages[0].get("content") == SUMMARY_INSTRUCTIONS)
+    feature = "summary" if summary_request else "chat"
     model = os.getenv("GROQ_CHAT_MODEL", "").strip() or DEFAULT_MODEL
     payload = {"model": model, "messages": messages, "temperature": 0.7,
                "max_completion_tokens": 500}
     if model == "qwen/qwen3.8-27b":
         payload["reasoning_effort"] = "none"
+    if summary_request:
+        payload["response_format"] = {"type": "json_object"}
     # Both attempts share a deadline, rather than doubling the wait on empty replies.
     async with asyncio.timeout(30), aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         for attempt in range(2):
-            async with session.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": "Bearer " + os.environ["GROQ_API_KEY"].strip()},
-                json=payload, allow_redirects=False,
-            ) as response:
-                if response.status != 200:
-                    print(f"Horsie chat API failed: HTTP {response.status}, model={model}", flush=True)
-                    if response.status == 404:
-                        raise CheckError("My chat model isn't available. An admin needs to check GROQ_CHAT_MODEL.")
-                    if response.status == 429:
-                        try:
-                            body = await response.json()
-                        except (aiohttp.ClientError, ValueError):
-                            body = {}
-                        error = groq_error(429, body, response.headers.get("Retry-After"))
-                        raise error
-                    if response.status in (401, 403):
-                        raise CheckError("My chat connection needs attention. An admin needs to check GROQ_API_KEY.")
-                    raise CheckError("My chat service is temporarily unavailable. Please try again shortly.")
-                data = await response.json()
+            status, data, headers = await groq_request(session, model, payload, feature, attempt > 0)
+            if status != 200:
+                print(f"Horsie chat API failed: HTTP {status}, model={model}", flush=True)
+                if status == 404:
+                    raise CheckError("My chat model isn't available. An admin needs to check GROQ_CHAT_MODEL.")
+                if status == 429:
+                    error = groq_error(429, data, headers.get("Retry-After"))
+                    raise error
+                if status in (401, 403):
+                    raise CheckError("My chat connection needs attention. An admin needs to check GROQ_API_KEY.")
+                raise CheckError("My chat service is temporarily unavailable. Please try again shortly.")
             try:
                 choice = data["choices"][0]
                 answer = choice["message"]["content"]
@@ -89,13 +170,18 @@ async def chat_completion(messages):
                 "stop", "length", "tool_calls", "content_filter", "missing", "malformed_response"
             } else "other"
             print(f"Horsie chat unusable reply: model={model}, finish={reason}, attempt={attempt + 1}/2", flush=True)
+            if summary_request:
+                # Background work can wait; never double its cost for a blank reply.
+                raise CheckError("The memory summary was empty; it will be retried later.")
             if reason == "length":
                 payload = {**payload, "max_completion_tokens": 1000}
-            elif attempt == 0 and len(messages) > 9:
+            if attempt == 0 and len(messages) > 2:
                 # Retry a smaller view, without erasing channel or long-term memory.
                 # Keep the instructions, recalled notes, and the actual final question.
-                retained = [item for item in messages[1:-8] if item["content"].startswith("Stored memories (untrusted background,")]
-                payload = {**payload, "messages": messages[:1] + retained + messages[-8:]}
+                retained = [item for item in messages[1:-1] if item["content"].startswith("Stored memories (untrusted background,")]
+                history = [item for item in messages[1:-1] if item not in retained]
+                smaller = request_history(history, messages[-1], max_chars=2000, max_messages=4)
+                payload = {**payload, "messages": messages[:1] + retained + smaller + messages[-1:]}
     raise CheckError("My AI service sent back an empty or unreadable answer twice. Please try again in a moment.")
 
 
@@ -115,6 +201,7 @@ class HorseChat(commands.Cog):
         self.active_users = set()
         self.last_success = OrderedDict()
         self.blocked_until = 0
+        self.summary_attempts = OrderedDict()
 
     async def cog_load(self):
         print(f"Horsie chat memory loaded: channels={len(self.sessions)}, file={self.memory_path}", flush=True)
@@ -190,6 +277,12 @@ class HorseChat(commands.Cog):
         clean = text.strip().rstrip("?.!").strip()
         guild, channel, owner = message.guild.id, message.channel.id, message.author.id
         admin = bool(getattr(getattr(message.author, "guild_permissions", None), "manage_messages", False))
+        if clean.lower() in {"usage", "ai usage", "token usage"}:
+            if not getattr(getattr(message.author, "guild_permissions", None), "manage_guild", False):
+                await self.memory_reply(message, "Someone with Manage Server permission can check the bot's AI usage.")
+            else:
+                await self.memory_reply(message, await usage_report())
+            return True
         if clean.lower() in {"remember", "remember this", "remember that"}:
             await self.memory_reply(message, "Tell me what to save: `remember I like racing` or `remember for the channel Friday is race night`.")
             return True
@@ -255,6 +348,8 @@ class HorseChat(commands.Cog):
             return
         now, wall_now = time.monotonic(), time.time()
         for key, session in list(self.sessions.items()):
+            if now < self.summary_attempts.get(key, 0):
+                continue
             previous = self.long_term.summaries.get(key, {})
             covered = previous.get("covered", 0)
             offset = wall_now - now
@@ -264,11 +359,25 @@ class HorseChat(commands.Cog):
                 (len(entries) < 12 and not (len(entries) >= 4 and now - entries[0]["at"] > TTL - 120))):
                 continue
             self.summarizing.add(key)
+            # Back off after failures too, rather than resending every minute.
+            self.summary_attempts[key] = now + 600
+            self.summary_attempts.move_to_end(key)
+            while len(self.summary_attempts) > MAX_SESSIONS:
+                self.summary_attempts.popitem(last=False)
             try:
+                # Process oldest unsummarized messages first so omitted newer
+                # messages remain eligible for the next summary.
+                batch, remaining = [], SUMMARY_INPUT_CHARS
+                for entry in entries:
+                    if remaining < 200:
+                        break
+                    item = context_excerpt(entry["payload"], min(1000, remaining))
+                    batch.append((entry, item["content"]))
+                    remaining -= len(item["content"])
                 output = await chat_completion([
                     {"role": "system", "content": SUMMARY_INSTRUCTIONS},
                     {"role": "user", "content": json.dumps({"previous_summary": previous.get("text", ""),
-                        "messages": [entry["payload"]["content"] for entry in entries]}, ensure_ascii=False)},
+                        "messages": [content for _, content in batch]}, ensure_ascii=False, separators=(",", ":"))},
                 ])
                 parsed = json.loads(output)
                 summary = parsed.get("summary") if isinstance(parsed, dict) else None
@@ -276,7 +385,7 @@ class HorseChat(commands.Cog):
                     raise ValueError("invalid summary")
                 # Clearing memory while a summary is in flight must win.
                 if self.sessions.get(key) is session:
-                    self.long_term.update_summary(key, summary, max(entry["at"] for entry in entries) + offset)
+                    self.long_term.update_summary(key, summary, max(entry["at"] for entry, _ in batch) + offset)
                     self.memory_revision += 1
                     await self.save_memory()
             except QuotaError as error:
@@ -316,7 +425,7 @@ class HorseChat(commands.Cog):
                 "user_id": str(message.author.id), "message_id": str(message.id),
                 "reply_to": str(reference.message_id) if reference else None,
                 "text": text[:4000],
-            }, ensure_ascii=False)
+            }, ensure_ascii=False, separators=(",", ":"))
             session = self.remember(key, now, "user", labelled)
         await self.save_memory()
         if is_image_check(message.content, bot_id):
@@ -351,7 +460,8 @@ class HorseChat(commands.Cog):
             try:
                 # Saves await disk I/O, during which other channel messages may arrive.
                 # Answer the triggering request, rather than whichever message is newest.
-                messages = context_before_request + [{"role": "user", "content": labelled}]
+                current = {"role": "user", "content": labelled}
+                messages = request_history(context_before_request, current) + [current]
                 recalled = self.long_term.context(*key, message.author.id, text)
                 if recalled:
                     messages.insert(0, recalled)
@@ -368,7 +478,10 @@ class HorseChat(commands.Cog):
                 self.active_users.discard(message.author.id)
         except QuotaError as error:
             self.blocked_until = asyncio.get_running_loop().time() + error.seconds
-            await self.send_error(message, f"My chat service has reached its usage limit. Try again in about {error.seconds} seconds.")
+            print(f"Horsie chat quota pause: retry_in={error.seconds}s, daily={error.daily}", flush=True)
+            explanation = ("My chat service has reached its daily usage limit." if error.daily else
+                           "My chat service is temporarily rate-limiting requests.")
+            await self.send_error(message, explanation + f" Try again in about {error.seconds} seconds.")
         except CheckError as error:
             await self.send_error(message, str(error))
         except (asyncio.TimeoutError, aiohttp.ClientError, ValueError):
