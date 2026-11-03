@@ -18,6 +18,7 @@ from horsie.chat_memory import load_memory, memory_snapshot
 from horsie.data_storage import data_path, write_json
 from horsie.long_term_memory import LongTermMemory, SUMMARY_INSTRUCTIONS
 from horsie.ai_usage import groq_request, usage_report
+from horsie import chatgpt_fallback
 
 
 INSTRUCTIONS = """You are Horsie, a friendly Discord horse bot. Be warm, helpful and
@@ -208,7 +209,7 @@ async def chat_completion(messages):
     if summary_request:
         models = models[:1]  # Reserve backup allowances for people chatting.
     errors = []
-    async with asyncio.timeout(30):
+    async with asyncio.timeout(45 if chatgpt_fallback.enabled() and not summary_request else 30):
         for index, model in enumerate(models):
             now = time.monotonic()
             deadline, previous = MODEL_PAUSES.get(model, (0, None))
@@ -231,6 +232,11 @@ async def chat_completion(messages):
                 safe = error if isinstance(error, ModelUnavailable) else ModelUnavailable("My chat service is temporarily unavailable. Please try again shortly.")
                 MODEL_PAUSES[model] = (time.monotonic() + 30, safe)
                 errors.append(safe)
+        if not summary_request and chatgpt_fallback.enabled():
+            try:
+                return await chatgpt_fallback.completion(completion_messages(messages))
+            except chatgpt_fallback.ChatGPTError:
+                print("Horsie ChatGPT last resort unavailable; no private account context requested.", flush=True)
     if errors and all(isinstance(error, QuotaError) for error in errors):
         raise min(errors, key=lambda error: error.seconds)
     if len(models) == 1 and errors:
@@ -334,7 +340,12 @@ class HorseChat(commands.Cog):
             if not getattr(getattr(message.author, "guild_permissions", None), "manage_guild", False):
                 await self.memory_reply(message, "Someone with Manage Server permission can check the bot's AI usage.")
             else:
-                await self.memory_reply(message, await usage_report())
+                report = await usage_report()
+                if chatgpt_fallback.enabled():
+                    status = ("paused without verified usage below 75%" if chatgpt_fallback.require_usage_guard()
+                              else "last resort; automatic 75% cutoff disabled by owner")
+                    report += "\nChatGPT plan: " + status + ". Manage app limits in ChatGPT Settings."
+                await self.memory_reply(message, report)
             return True
         if clean.lower() in {"remember", "remember this", "remember that"}:
             await self.memory_reply(message, "Tell me what to save: `remember I like racing` or `remember for the channel Friday is race night`.")

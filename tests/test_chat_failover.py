@@ -87,3 +87,19 @@ class FailoverTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(chat_models(), [DEFAULT_MODEL, "backup", "third"])
         with patch.dict(os.environ, {"GROQ_CHAT_FALLBACK_MODELS": ""}):
             self.assertEqual(chat_models(), [DEFAULT_MODEL])
+
+    async def test_optional_chatgpt_is_last_and_never_used_for_background_summaries(self):
+        failures = [(503, {}, {})] * 3
+        with patch("horsie.horse_chat.groq_request", AsyncMock(side_effect=failures)) as request, \
+                patch("horsie.horse_chat.chatgpt_fallback.enabled", return_value=True), \
+                patch("horsie.horse_chat.chatgpt_fallback.completion", AsyncMock(return_value="Final fallback")) as last:
+            self.assertEqual(await chat_completion(MESSAGES), "Final fallback")
+            self.assertEqual(request.await_count, 3)
+            last.assert_awaited_once_with(MESSAGES)
+        self.pauses.clear()
+        with patch("horsie.horse_chat.groq_request", AsyncMock(return_value=(503, {}, {}))), \
+                patch("horsie.horse_chat.chatgpt_fallback.enabled", return_value=True), \
+                patch("horsie.horse_chat.chatgpt_fallback.completion", AsyncMock()) as last:
+            with self.assertRaises(CheckError):
+                await chat_completion([{"role": "system", "content": SUMMARY_INSTRUCTIONS}, {"role": "user", "content": "summary"}])
+            last.assert_not_awaited()

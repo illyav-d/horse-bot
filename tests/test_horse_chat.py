@@ -138,6 +138,19 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         await self.cog.on_message(clear)
         self.assertEqual([note["scope"] for note in self.cog.long_term.notes], ["personal"])
 
+    async def test_private_health_notes_and_other_channel_context_are_not_recalled_for_other_people(self):
+        self.cog.long_term.add(1, 20, 7, "personal", "My weight is a private health fact")
+        self.cog.long_term.add(2, 20, 8, "personal", "My calorie tracking from another server")
+        self.cog.long_term.update_summary((1, 21), "Private diet discussion from another channel", 1)
+        self.cog.remember((1, 21), asyncio.get_running_loop().time(), "user", "Other channel's private conversation")
+        request = self.request("<@42> what do you know about Alice?")
+        request.author.id = 8
+        with patch("horsie.horse_chat.chat_completion", AsyncMock(return_value="I don't know private facts about Alice.")) as api:
+            await self.cog.on_message(request)
+        sent = str(api.await_args.args[0])
+        for forbidden in ("private health fact", "calorie tracking", "Private diet discussion", "Other channel's private conversation"):
+            self.assertNotIn(forbidden, sent)
+
     async def test_summary_recalled_after_recent_context_expires_and_survives_invalid_update(self):
         now = asyncio.get_running_loop().time()
         for number in range(12):

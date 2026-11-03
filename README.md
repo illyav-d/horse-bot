@@ -2,7 +2,7 @@
 
 A small Discord bot with horse-themed commands, games, a WoW Forever countdown, and an FFXIV market-board watcher.
 
-Current version: **1.9.3**
+Current version: **1.9.4**
 
 ## Project Layout
 
@@ -38,6 +38,10 @@ Discord login rate limits now wait in-process instead of triggering Railway rest
 - Varied horse posts, facts, carrot replies, race announcements, and Horsejack text
 - On-demand light horse articles
 - Ping Horsie to assess your latest image or GIF for signs of AI generation
+
+## Version 1.9.4
+
+- Horsie can use an authorized ChatGPT connection as a final chat backup.
 
 ## Version 1.9.3
 
@@ -122,6 +126,18 @@ Chat uses the existing `GROQ_API_KEY`, with `qwen/qwen3.8-27b` by default (see [
 Mention Horsie with `usage`, `ai usage` or `token usage` to see reported input/output tokens, cached input tokens, API attempts, retries, errors and rate-limit responses. This local request requires Manage Server permission and makes no AI call. The report shows today's totals by chat, memory summaries and image checks, plus the last seven UTC days' total. It covers the whole bot, across servers. Cached tokens are a subset of input tokens and are not counted twice. Each attempt is counted, including blank responses, retries and transport failures; attempts without valid provider token counts are explicitly marked as unreported rather than estimated as free.
 
 Daily aggregates are retained for 31 UTC dates, separated by feature and model, in `horse_ai_usage.json` on the Railway volume (locally `data/horse_ai_usage.json`). Set `HORSE_AI_USAGE_FILE` to override the path. Writes are atomic and survive restarts. No prompts, answers, images, user IDs or credentials are stored in this ledger. Tracking begins when this version runs: it cannot recover earlier consumption, include other applications' usage or establish the account's remaining quota. Storage failures are logged and shown in the report; live counters are retained for the next save attempt.
+
+## Optional ChatGPT subscription fallback
+
+The local `scripts/chatgpt_login.py` helper prepares a separate Sign in with ChatGPT registration for Horsie using OpenAI's public OAuth/PKCE flow. It does not reuse Codex credentials or request, import or search existing ChatGPT conversations, ChatGPT memories, weight, diet or calorie tracking. Only Horsie's supplied Discord context is used for inference. No tools, ChatGPT conversation IDs or previous response IDs are sent; requests use `store=false` and `stream=true`. Discord context remains isolated by channel/server, and personal notes are recalled only for their owner. Signing in grants model usage and may consume the subscriber's shared Plus allowance; it does not grant access to private ChatGPT chats.
+
+This connection is opt-in with `CHATGPT_LAST_RESORT=true` and valid Horsie credentials. It runs only after all three Groq chat models fail. Background summaries and image checks never use the subscription. It uses only model access authorized through the separate Horsie sign-in, not an OpenAI API key or another app's session.
+
+The percentage safeguard defaults to strict: no new ChatGPT request is admitted at or above 75% of total Plus usage, or without a fresh verified reading. No documented, verified source of this overall percentage has been found in the sign-in API, so the strict setting currently blocks all ChatGPT requests. An owner who accepts proceeding without this automatic cutoff can explicitly set `CHATGPT_REQUIRE_USAGE_GUARD=false`. This does not remove OpenAI's own plan limits. Horsie's token counter and Codex quota are not substitutes for the shared Plus percentage. Native per-app limits remain available in ChatGPT Settings. `@Horsie usage` shows whether the automatic cutoff is required or explicitly disabled.
+
+The fallback buffers streamed text until `response.completed`, tracks provider-reported tokens separately as `chatgpt/<model>`, and refreshes only Horsie's own renewable session. This route uses up to 15 seconds, with a 45-second total chat deadline when configured. Credentials live in `horse_chatgpt_auth.json` in the normal data directory (override `HORSE_CHATGPT_AUTH_FILE`), encrypted for the local Windows user with DPAPI or protected with Unix mode 0600. They are never committed or logged. `HORSE_CHATGPT_AUTH_BOOTSTRAP` can securely seed a remote runtime via a Railway secret containing the base64-encoded registration JSON. It is used only when the credential file is absent; refreshed credentials on the persistent volume always take priority. The remote runtime receives its own persistent host ID. Do not run local and remote refreshers against the same renewable session at once.
+
+The optional login helper's dependency can be installed locally with `python -m pip install --target data/siwc_deps "PyJWT[crypto]>=2.10,<3"`. Run `python scripts/chatgpt_login.py` only when ready to authorize the connection; this binds a loopback callback for five minutes and prints the official sign-in URL. Sign-in alone does not enable the fallback or waive the percentage guard. The helper selects the first visible model in the account's catalog; `CHATGPT_FALLBACK_MODEL` optionally overrides it with another authorized model. See [OpenAI's sign-in documentation](https://developers.openai.com/siwc/token-sharing-open-source) and [Plus shared usage](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions).
 
 ## Lasting Memories
 
@@ -264,6 +280,11 @@ The bot reads configuration from environment variables.
 | `GROQ_CHAT_FALLBACK_MODELS` | No | Comma-separated chat backups; defaults to `openai/gpt-oss-20b,openai/gpt-oss-120b`; empty disables backups |
 | `HORSE_CHAT_MEMORY_FILE` | No | Persistent channel memory path; defaults to `horse_chat_memory.json` on the Railway volume, or `data/horse_chat_memory.json` locally |
 | `HORSE_AI_USAGE_FILE` | No | Persistent AI usage totals; defaults to `horse_ai_usage.json` on the Railway volume, or `data/horse_ai_usage.json` locally |
+| `CHATGPT_LAST_RESORT` | No | Set `true` to opt in to the authorized ChatGPT final fallback |
+| `CHATGPT_REQUIRE_USAGE_GUARD` | No | Defaults to `true`; explicit `false` waives the currently unavailable automatic 75% Plus cutoff |
+| `HORSE_CHATGPT_AUTH_FILE` | No | Protected Horsie ChatGPT registration on the normal data path |
+| `HORSE_CHATGPT_AUTH_BOOTSTRAP` | No | Secret base64 registration used once if the remote credential file is absent; never log or commit |
+| `CHATGPT_FALLBACK_MODEL` | No | Authorized model override; otherwise uses the model saved during sign-in |
 | `GROQ_REALITY_CHECK_MODEL` | No | Groq vision model; defaults to `qwen/qwen3.8-27b` |
 | `GROQ_REALITY_CHECK_REVIEW` | No | Set to `true` to enable an extra assessment for uncertain results; disabled by default to conserve quota |
 | `TRAMPLE_ALL_MAX_MESSAGES` | No | Maximum messages deleted by `!trample all`; default is `1000` |
